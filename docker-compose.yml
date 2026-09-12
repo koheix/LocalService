@@ -1,0 +1,87 @@
+name: llm-console
+
+services:
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${PROXY_PORT:-8080}:8080"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - gateway
+    networks: [llmnet]
+
+  gateway:
+    build: ./gateway
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      LLM_BACKEND: ollama
+      LLM_BACKEND_URL: http://ollama:11434
+      EMBED_BACKEND_URL: http://ollama-embed:11434
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [llmnet]
+    # NOTE: ポートをホストに公開しない。外部からは proxy 経由のみ。
+
+  # LLM 推論。GPU を占有する。
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: "5m"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_HOST: "0.0.0.0:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [llmnet]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # NOTE: ポートを公開しないこと。Ollama には利用者単位の認証がない。
+
+  # Embedding 専用。GPU を割り当てないので CPU で動く。
+  ollama-embed:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: "24h"
+      OLLAMA_HOST: "0.0.0.0:11434"
+    volumes:
+      - ollama-embed-models:/root/.ollama
+    networks: [llmnet]
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [llmnet]
+
+volumes:
+  ollama-models:
+  ollama-embed-models:
+  pgdata:
+  caddy-data:
+
+networks:
+  llmnet:
+    driver: bridge
