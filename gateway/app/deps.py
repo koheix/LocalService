@@ -1,5 +1,6 @@
 """FastAPI Depends（現在ユーザー取得、権限チェック）。"""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import Cookie, Depends, Header
@@ -11,6 +12,14 @@ from app.db import get_db
 from app.errors import AuthenticationError, PermissionError_
 from app.models import ApiKey, User
 from app.models import Session as SessionModel
+
+
+@dataclass
+class AuthContext:
+    """認証済みユーザーと、利用された認証情報(APIキーの場合はそのID)。"""
+
+    user: User
+    api_key_id: int | None = None
 
 
 async def _user_from_session(db: AsyncSession, token: str) -> User | None:
@@ -26,7 +35,7 @@ async def _user_from_session(db: AsyncSession, token: str) -> User | None:
     return await db.get(User, session.user_id)
 
 
-async def _user_from_api_key(db: AsyncSession, key: str) -> User | None:
+async def _auth_from_api_key(db: AsyncSession, key: str) -> AuthContext | None:
     if len(key) < 8:
         return None
     prefix = key[:8]
@@ -37,24 +46,32 @@ async def _user_from_api_key(db: AsyncSession, key: str) -> User | None:
         if verify_api_key(key, api_key.key_hash):
             api_key.last_used_at = datetime.now(UTC)
             await db.commit()
-            return await db.get(User, api_key.user_id)
+            user = await db.get(User, api_key.user_id)
+            if user is None:
+                return None
+            return AuthContext(user=user, api_key_id=api_key.id)
     return None
 
 
-async def current_user(
+async def current_auth(
     db: AsyncSession = Depends(get_db),
     session: str | None = Cookie(default=None),
     authorization: str | None = Header(default=None),
-) -> User:
-    user: User | None = None
+) -> AuthContext:
+    ctx: AuthContext | None = None
     if authorization and authorization.lower().startswith("bearer "):
-        user = await _user_from_api_key(db, authorization[7:].strip())
+        ctx = await _auth_from_api_key(db, authorization[7:].strip())
     elif session:
         user = await _user_from_session(db, session)
+        ctx = AuthContext(user=user) if user else None
 
-    if user is None or not user.is_active:
+    if ctx is None or not ctx.user.is_active:
         raise AuthenticationError("認証が必要です")
-    return user
+    return ctx
+
+
+async def current_user(ctx: AuthContext = Depends(current_auth)) -> User:
+    return ctx.user
 
 
 async def require_admin(user: User = Depends(current_user)) -> User:
