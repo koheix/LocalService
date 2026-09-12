@@ -110,9 +110,9 @@ c.chat.completions.create(model="chat-standard",
 ---
 
 ### T-09 管理 API
-- [ ] `GET /api/admin/health` / `/gpu` / `/usage`
-- [ ] ユーザー CRUD、モデル CRUD
-- [ ] `POST /api/admin/models/{id}/pull`（SSE で進捗）
+- [x] `GET /api/admin/health` / `/gpu` / `/usage`
+- [x] ユーザー CRUD、モデル CRUD
+- [x] `POST /api/admin/models/{id}/pull`（SSE で進捗）
 
 **完了条件**
 `/api/admin/gpu` が実際の VRAM 使用量を返す。`nvidia-smi` が叩けない場合も

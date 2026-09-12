@@ -54,6 +54,12 @@ class BackendUnavailableError(AppError):
     code = "BACKEND_UNAVAILABLE"
 
 
+class ConflictError(AppError):
+    status_code = 409
+    error_type = "conflict"
+    code = "CONFLICT"
+
+
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _handle(_: Request, exc: AppError) -> JSONResponse:

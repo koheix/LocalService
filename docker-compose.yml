@@ -22,10 +22,21 @@ services:
       LLM_BACKEND: ollama
       LLM_BACKEND_URL: http://ollama:11434
       EMBED_BACKEND_URL: http://ollama-embed:11434
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: utility
     depends_on:
       postgres:
         condition: service_healthy
     networks: [llmnet]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              # utility のみ: nvidia-smi によるVRAM監視用。compute能力は
+              # 要求しないため LLM 用の VRAM 専有(D-001/D-002)とは無関係。
+              capabilities: [utility]
     # NOTE: ポートをホストに公開しない。外部からは proxy 経由のみ。
 
   # LLM 推論。GPU を占有する。

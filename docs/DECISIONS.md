@@ -169,3 +169,25 @@ usage_logs に記録が残らなかった。
 （利用実績の集計・不正利用検知の基礎データになるため）。shield は
 無制限に待ち続けるリスクはあるが、DB 書き込み自体は数十ms程度で
 完了する想定であり Phase 0 では許容する。
+
+---
+
+## D-013 gateway コンテナに NVIDIA の utility capability のみ付与する
+
+**背景** — `GET /api/admin/gpu` で実際の VRAM 使用量を返すには、
+gateway コンテナから `nvidia-smi` を実行できる必要がある。しかし
+`ollama` サービスのように `capabilities: [gpu]` を付与すると、
+CUDA 計算能力まで要求してしまい「VRAM は LLM 専有」という
+ハード制約（D-001/D-002）と衝突しかねない。
+
+**判断** — `docker-compose.yml` の `gateway` サービスに
+`NVIDIA_DRIVER_CAPABILITIES: utility` と
+`deploy.resources.reservations.devices[].capabilities: [utility]` を
+追加した。`gpu`(compute) ではなく `utility` のみを要求することで、
+ドライバライブラリと `nvidia-smi` バイナリだけがコンテナに注入され、
+VRAM 確保は発生しない。
+
+**確認** — gateway コンテナ内で `nvidia-smi` が実行でき、実際の
+使用量(MiB)を返すことを確認済み。バイナリが無い/失敗するケースの
+フォールバック(`available: false`)も、存在しないコマンド名を使って
+`FileNotFoundError`(`OSError` 派生)が捕捉されることを確認した。
