@@ -49,11 +49,11 @@ GTX 1080 を表示する。
 ---
 
 ### T-05 認証
-- [ ] Argon2id によるパスワードハッシュ
-- [ ] セッション発行・検証・失効（HttpOnly / SameSite=Lax Cookie）
-- [ ] APIキー発行・検証（平文は発行時のみ返す。DBはハッシュのみ）
-- [ ] `deps.py` に `current_user` / `require_admin`
-- [ ] `scripts/seed.py`（冪等）
+- [x] Argon2id によるパスワードハッシュ
+- [x] セッション発行・検証・失効（HttpOnly / SameSite=Lax Cookie）
+- [x] APIキー発行・検証（平文は発行時のみ返す。DBはハッシュのみ）
+- [x] `deps.py` に `current_user` / `require_admin`
+- [x] `scripts/seed.py`（冪等）
 
 **完了条件**
 - シードした管理者でログインでき、`GET /api/auth/me` が正しいロールを返す

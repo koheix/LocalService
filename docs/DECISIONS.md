@@ -109,3 +109,28 @@ WORKDIR の `/app` はカレントディレクトリではあっても `sys.path
 **判断** — `Makefile` の `migrate` / `revision` ターゲットを
 `docker compose exec gateway python -m alembic ...` に統一する。
 今後 gateway コンテナ内で alembic を直接呼ぶ場合も同様にすること。
+
+---
+
+## D-009 セッションは失効時に物理削除する
+
+**判断** — ログアウト時・期限切れ検出時ともに `sessions` 行を `DELETE` する。
+論理削除用の `revoked_at` カラムは追加しない。
+
+**理由** — `docs/SCHEMA.md` の `sessions` テーブル定義に `revoked_at` が
+存在せず、追加するとスキーマ変更が必要になる。同時利用1名の検証機では
+セッション監査証跡の必要性が薄く、実装を単純に保つ方を優先した。
+ユーザーに確認済み。
+
+## D-010 APIキーは `sk-` 全体を Argon2id でハッシュする
+
+**判断** — API キーは `sk-<32byteランダム>` を発行し、`key_hash` には
+キー全体を Argon2id でハッシュしたものを保存する。検証時は
+`key_prefix`（先頭8文字）で候補行を絞り込んでから Argon2 verify する。
+
+**理由** — `docs/SCHEMA.md` の `api_keys.key_hash` に `-- Argon2id` と
+明記されている。SHA-256 等の高速ハッシュは DB 漏洩時により安全側だが、
+仕様に反するためユーザーに確認のうえ Argon2id を採用した。
+リクエスト毎に Argon2 検証のコストがかかる点は Phase 0（同時利用1名）
+では許容範囲と判断。将来ボトルネックになる場合は候補を減らす
+（key_prefix の桁数を増やす等）対応を検討する。
