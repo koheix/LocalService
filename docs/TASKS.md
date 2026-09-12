@@ -74,11 +74,13 @@ GTX 1080 を表示する。
 ---
 
 ### T-07 OpenAI 互換エンドポイント
-- [ ] `GET /api/v1/models` — `served_name` を返す
-- [ ] `POST /api/v1/chat/completions` — 非ストリーミング
-- [ ] 同上 — ストリーミング（SSE 中継、末尾に `data: [DONE]`）
-- [ ] `POST /api/v1/embeddings`
-- [ ] `docs/API.md` の処理順序どおりに実装（認証→存在→権限→レート→スロット→転送→記録）
+- [x] `GET /api/v1/models` — `served_name` を返す
+- [x] `POST /api/v1/chat/completions` — 非ストリーミング
+- [x] 同上 — ストリーミング（SSE 中継、末尾に `data: [DONE]`）
+- [x] `POST /api/v1/embeddings`
+- [x] `docs/API.md` の処理順序どおりに実装（認証→存在→権限→レート→スロット→転送→記録）
+      ※ レート制限・同時実行スロット・usage_logs記録は T-08 で追加する
+        (このタスクでは 認証→存在→権限→転送 を実装)
 
 **完了条件**
 以下が動くこと。
