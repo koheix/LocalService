@@ -8,8 +8,8 @@
 ## Phase 0 — 基盤を立てる
 
 ### T-01 ホストセットアップの確立
-- [ ] `scripts/setup-host.sh` を完成させる（Docker / NVIDIA Container Toolkit）
-- [ ] Linux Mint 22.3 で `ID=linuxmint` を回避し `noble` / `ubuntu24.04` を明示していること
+- [x] `scripts/setup-host.sh` を完成させる（Docker / NVIDIA Container Toolkit）
+- [x] Linux Mint 22.3 で `ID=linuxmint` を回避し `noble` / `ubuntu24.04` を明示していること
 
 **完了条件**
 `docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi` が

@@ -73,3 +73,21 @@ gateway 側で直列化するとスループットが大幅に落ちる。並列
 
 **理由** — 後から差し込むと全アプリのリクエスト経路を書き直すことになる。
 一方 Prometheus / Grafana / Redis は後付けが容易なので Phase 0 では入れない。
+
+---
+
+## D-007 NVIDIA Container Toolkit のリポジトリは distro 非依存の stable/deb を使う
+
+**背景** — `scripts/setup-host.sh` で当初 `libnvidia-container/ubuntu24.04/libnvidia-container.list`
+という distro 別パスを指定していたが、`curl` が 404 を返してインストールに失敗した。
+
+**判断** — distro 別パスではなく、NVIDIA が現在案内している distro 非依存の
+`https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list`
+を使う。
+
+**理由** — NVIDIA は distro 別のリポジトリ一覧（`ubuntu24.04` 等）を廃止し、
+`stable/deb` 配下の共通リポジトリに一本化している。Docker 側のリポジトリ指定
+（`noble` 固定）とは別物であり、こちらは codename/distro 指定が不要になった。
+
+**影響** — `scripts/setup-host.sh` の NVIDIA Container Toolkit 導入部分のみ修正。
+Docker Engine 側の `noble` 固定は変更なし。
