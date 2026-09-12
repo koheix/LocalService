@@ -30,7 +30,7 @@
 
 - `:8080`（開発）/ `:443`（本番）を公開
 - `/api/*` → `gateway:8000`
-- `/*` → `console`（Phase 2 まではプレースホルダ）
+- `/*` → 静的ファイル配信（`caddy/console/`。ビルド不要の HTML/CSS/JS。D-014）
 - 社内CA or 自己署名証明書。Let's Encrypt は閉域のため使わない
 
 ### gateway (FastAPI)

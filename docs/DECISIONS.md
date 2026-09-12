@@ -191,3 +191,30 @@ VRAM 確保は発生しない。
 使用量(MiB)を返すことを確認済み。バイナリが無い/失敗するケースの
 フォールバック(`available: false`)も、存在しないコマンド名を使って
 `FileNotFoundError`(`OSError` 派生)が捕捉されることを確認した。
+
+---
+
+## D-014 console(Web UI)をPhase 1に前倒しし、ビルド不要の静的サイトにする
+
+**背景** — `CLAUDE.md`/`docs/ARCHITECTURE.md` は当初「console(Web UI)は
+Phase 2以降、それまでは `/api/docs` で操作する」としていたが、
+`docs/TASKS.md` の Phase 1 タスク一覧には「モデル選択つきチャットUI」が
+既に含まれており矛盾していた。ユーザーに確認し、Phase 1 の時点で
+実際に Web UI（プレイグラウンド）を作ることに決定した。
+
+**判断**
+- console は Phase 1 から着手する（`CLAUDE.md`/`ARCHITECTURE.md` を修正）。
+- フロントエンドはビルド不要の静的 HTML/CSS/Vanilla JS とする
+  （React/Vue 等のビルドチェーンは導入しない）。
+- 専用コンテナは立てず、`proxy`(Caddy) が `caddy/console/` 配下の
+  静的ファイルを直接配信する。`/api/*` は従来どおり `gateway` へ。
+
+**理由** — 検証機は小型GPUサーバー1台で完結させる方針であり、
+Node.js ビルド環境やSPAフレームワークの複雑さを持ち込むメリットが
+Phase 1 の時点では薄い。fetch API + テンプレート関数で十分な規模。
+Caddy は既に `file_server` を持つため、専用コンテナを増やさずに済む。
+ユーザーに確認済み。
+
+**影響** — Phase 1 のタスクを T-11〜T-14 として `docs/TASKS.md` に
+分解した。会話履歴・システムプロンプト保存用に `conversations` /
+`messages` テーブルを新設する（T-11、`docs/SCHEMA.md` に追記）。

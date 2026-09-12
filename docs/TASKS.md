@@ -129,12 +129,62 @@ c.chat.completions.create(model="chat-standard",
 
 ---
 
-## Phase 1 — プレイグラウンド（着手前にユーザーと仕様確認）
+## Phase 1 — プレイグラウンド
 
-- [ ] モデル選択つきチャット UI
-- [ ] システムプロンプト保存
-- [ ] パラメータ調整（temperature / top_p / max_tokens）
-- [ ] 会話履歴の保存
+方針は D-014 で決定済み（Web UI をPhase 1で作る、ビルド不要の静的サイト、
+専用コンテナは立てず Caddy が配信）。以下のタスクに分解して進める。
+
+---
+
+### T-11 会話履歴スキーマ
+- [ ] `conversations` テーブル（user_id, title, model_id, system_prompt,
+      temperature, top_p, max_tokens, created_at, updated_at）
+- [ ] `messages` テーブル（conversation_id, role, content, created_at）
+- [ ] `docs/SCHEMA.md` に追記
+- [ ] Alembic リビジョン追加
+
+**完了条件**
+`make migrate` 後、`\d conversations` `\d messages` で列が確認できる。
+
+---
+
+### T-12 会話CRUD API
+- [ ] `GET/POST /api/conversations`
+- [ ] `GET/PATCH/DELETE /api/conversations/{id}`
+- [ ] `GET /api/conversations/{id}/messages`
+- [ ] 他ユーザーの会話は `404`（存在の有無を漏らさない）
+
+**完了条件**
+自分の会話のみ一覧・取得・更新・削除でき、他ユーザーの会話IDを指定すると
+`404` になる。`system_prompt` / `temperature` / `top_p` / `max_tokens` /
+`model_id` を作成・更新できる。
+
+---
+
+### T-13 チャット送信API（ストリーミング）
+- [ ] `POST /api/conversations/{id}/messages`:
+      ユーザーメッセージ保存 → 推論 → アシスタント応答保存
+- [ ] SSE ストリーミング対応
+- [ ] `usage_logs` に `app='playground'` で記録
+
+**完了条件**
+ブラウザ以外（curl等）から会話を継続でき、リロード相当（再度
+`GET .../messages`）しても履歴が残る。`usage_logs.app` が `playground`
+になっている。
+
+---
+
+### T-14 console 静的UI
+- [ ] `caddy/console/` に HTML/CSS/Vanilla JS を配置
+- [ ] `caddy/Caddyfile` に静的配信を追加（`/*` → `file_server`）
+- [ ] ログイン画面
+- [ ] 会話一覧・新規作成・切り替え
+- [ ] チャット画面（モデル選択、システムプロンプト編集、
+      temperature/top_p/max_tokens調整、ストリーミング表示）
+
+**完了条件**
+ブラウザで `http://localhost:8080/` を開き、ログイン→モデル選択→
+システムプロンプト設定→チャット→履歴が残ることを一連の操作で確認できる。
 
 ## Phase 2 — 社内文書検索（RAG）
 
