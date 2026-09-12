@@ -222,8 +222,8 @@ PDF・Word・テキストファイルをそれぞれアップロードでき、`
 ---
 
 ### T-17 RAG検索API
-- [ ] `POST /api/rag/query` `{"question": "..."}`
-- [ ] 質問を埋め込み化 → pgvectorのコサイン類似度で `chunks` を検索 → 上位N件を
+- [x] `POST /api/rag/query` `{"question": "..."}`
+- [x] 質問を埋め込み化 → pgvectorのコサイン類似度で `chunks` を検索 → 上位N件を
       コンテキストにチャット推論 → 引用（`document_id`・ファイル名・該当チャンク）
       付きで回答を返す
 
