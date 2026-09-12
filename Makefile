@@ -22,11 +22,11 @@ pull-models:
 	bash scripts/pull-models.sh
 
 migrate:
-	$(DC) exec gateway alembic upgrade head
+	$(DC) exec gateway python -m alembic upgrade head
 
 revision:
 	@test -n "$(m)" || (echo 'ERROR: make revision m="説明" の形で実行してください' && exit 1)
-	$(DC) exec gateway alembic revision --autogenerate -m "$(m)"
+	$(DC) exec gateway python -m alembic revision --autogenerate -m "$(m)"
 
 seed:
 	$(DC) exec gateway python -m scripts.seed

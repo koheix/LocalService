@@ -91,3 +91,21 @@ gateway 側で直列化するとスループットが大幅に落ちる。並列
 
 **影響** — `scripts/setup-host.sh` の NVIDIA Container Toolkit 導入部分のみ修正。
 Docker Engine 側の `noble` 固定は変更なし。
+
+---
+
+## D-008 Alembic はコンソールスクリプトではなく `python -m alembic` で呼ぶ
+
+**背景** — `docker compose exec gateway alembic upgrade head` を実行すると
+`ModuleNotFoundError: No module named 'app'` で失敗した。
+
+**理由** — pip がインストールする `alembic` コンソールスクリプトは
+`sys.path[0]` にスクリプト自身の置き場所（`/usr/local/bin`）を積む。
+WORKDIR の `/app` はカレントディレクトリではあっても `sys.path` には
+含まれないため、`gateway/alembic/env.py` の `from app.config import ...` が
+解決できない。`python -m alembic ...` で起動すると `sys.path[0]` が
+カレントディレクトリ（`''` → `/app`）になり解決できる。
+
+**判断** — `Makefile` の `migrate` / `revision` ターゲットを
+`docker compose exec gateway python -m alembic ...` に統一する。
+今後 gateway コンテナ内で alembic を直接呼ぶ場合も同様にすること。

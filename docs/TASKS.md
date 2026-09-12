@@ -29,9 +29,9 @@ GTX 1080 を表示する。
 ---
 
 ### T-03 Postgres とマイグレーション
-- [ ] `postgres` サービス（pgvector 入り）
-- [ ] Alembic 初期化、`docs/SCHEMA.md` の全テーブルを1つのリビジョンで作成
-- [ ] `make migrate` が通る
+- [x] `postgres` サービス（pgvector 入り）
+- [x] Alembic 初期化、`docs/SCHEMA.md` の全テーブルを1つのリビジョンで作成
+- [x] `make migrate` が通る
 
 **完了条件**
 `\dt` で全テーブルが存在し、`CREATE EXTENSION vector` が成功している。
