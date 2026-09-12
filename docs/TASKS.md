@@ -162,10 +162,10 @@ c.chat.completions.create(model="chat-standard",
 ---
 
 ### T-13 チャット送信API（ストリーミング）
-- [ ] `POST /api/conversations/{id}/messages`:
+- [x] `POST /api/conversations/{id}/messages`:
       ユーザーメッセージ保存 → 推論 → アシスタント応答保存
-- [ ] SSE ストリーミング対応
-- [ ] `usage_logs` に `app='playground'` で記録
+- [x] SSE ストリーミング対応
+- [x] `usage_logs` に `app='playground'` で記録
 
 **完了条件**
 ブラウザ以外（curl等）から会話を継続でき、リロード相当（再度

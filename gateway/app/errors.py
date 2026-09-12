@@ -60,6 +60,12 @@ class ConflictError(AppError):
     code = "CONFLICT"
 
 
+class InvalidRequestError(AppError):
+    status_code = 400
+    error_type = "invalid_request_error"
+    code = "INVALID_REQUEST"
+
+
 def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _handle(_: Request, exc: AppError) -> JSONResponse:
