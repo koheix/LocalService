@@ -23,7 +23,7 @@ from app.backends.base import BackendHealth, InferenceBackend
 from app.db import async_session_maker
 from app.limits import concurrency_slots, rate_limiter
 from app.main import app
-from app.models import Model, ModelPermission, Quota, User
+from app.models import Document, Model, ModelPermission, Quota, User
 
 
 class FakeBackend:
@@ -87,16 +87,24 @@ def fake_backend(monkeypatch: pytest.MonkeyPatch) -> FakeBackend:
     fake = FakeBackend()
     assert isinstance(fake, InferenceBackend)
 
-    for mod in ("app.routers.v1", "app.routers.conversations", "app.routers.admin"):
+    chat_backend_mods = (
+        "app.routers.v1",
+        "app.routers.conversations",
+        "app.routers.admin",
+        "app.routers.rag",
+    )
+    for mod in chat_backend_mods:
         monkeypatch.setattr(f"{mod}.get_chat_backend", lambda: fake)
-    for mod in ("app.routers.v1", "app.routers.admin"):
+    for mod in ("app.routers.v1", "app.routers.admin", "app.routers.rag", "app.rag"):
         monkeypatch.setattr(f"{mod}.get_embed_backend", lambda: fake)
 
     # パッチが実際に効いていることをここで確認する。将来 import の形が
     # 変わってパッチが効かなくなった場合、テストが実Ollamaに到達して
     # タイムアウトする前にここで気づけるようにする。
+    import app.rag as rag_mod
     import app.routers.admin as admin_mod
     import app.routers.conversations as conv_mod
+    import app.routers.rag as rag_router_mod
     import app.routers.v1 as v1_mod
 
     assert v1_mod.get_chat_backend() is fake
@@ -104,6 +112,9 @@ def fake_backend(monkeypatch: pytest.MonkeyPatch) -> FakeBackend:
     assert conv_mod.get_chat_backend() is fake
     assert admin_mod.get_chat_backend() is fake
     assert admin_mod.get_embed_backend() is fake
+    assert rag_router_mod.get_chat_backend() is fake
+    assert rag_router_mod.get_embed_backend() is fake
+    assert rag_mod.get_embed_backend() is fake
 
     return fake
 
@@ -204,10 +215,25 @@ async def make_quota(db: AsyncSession) -> Callable[..., Awaitable[Quota]]:
     return _make
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _cleanup_documents_after_test() -> AsyncIterator[None]:
+    """テストが作った Document/Chunk を毎テスト後に消す(共有DBの chunks に
+
+    残ると、RAGのコサイン距離検索が他テストの投入したベクトルまで拾って
+    フレークする)。Chunk は documents への ondelete=CASCADE で連動削除される。
+    ファイル名を "pytest-" プレフィックスで揃えている前提。
+    """
+    yield
+    async with async_session_maker() as session:
+        await session.execute(delete(Document).where(Document.filename.like("pytest-%")))
+        await session.commit()
+
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _cleanup_test_data() -> AsyncIterator[None]:
     yield
     async with async_session_maker() as session:
+        await session.execute(delete(Document).where(Document.filename.like("pytest-%")))
         await session.execute(delete(User).where(User.email.like("pytest-%")))
         await session.execute(delete(Model).where(Model.served_name.like("pytest-%")))
         await session.commit()

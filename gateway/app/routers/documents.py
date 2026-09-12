@@ -24,6 +24,22 @@ from app.rag import index_document
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 _ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+_UPLOAD_READ_CHUNK_SIZE = 1024 * 1024  # 1MB
+
+
+async def _read_upload_within_limit(file: UploadFile, max_size: int) -> bytes:
+    """上限を超えた時点で打ち切り、上限超のファイル全体をメモリに載せない。"""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise InvalidRequestError(f"ファイルサイズが上限({max_size}バイト)を超えています")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 class DocumentOut(BaseModel):
@@ -70,11 +86,7 @@ async def upload_document(
             f"対応していないファイル形式です(pdf/docx/txtのみ): {ext or '(拡張子なし)'}"
         )
 
-    data = await file.read()
-    if len(data) > settings.max_upload_size_bytes:
-        raise InvalidRequestError(
-            f"ファイルサイズが上限({settings.max_upload_size_bytes}バイト)を超えています"
-        )
+    data = await _read_upload_within_limit(file, settings.max_upload_size_bytes)
 
     uploads_dir = Path(settings.uploads_dir)
     storage_path = uploads_dir / f"{uuid.uuid4().hex}{ext}"

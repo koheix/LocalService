@@ -76,8 +76,13 @@ async def index_document(document_id: int) -> None:
             if not chunks:
                 raise ValueError("文書からテキストを抽出できませんでした")
 
+            # id 昇順で固定する。ORDER BY が無いと、検索時(routers/rag.py の
+            # _pick_permitted_model も同じ規則で id 昇順にしてある)と異なる
+            # モデルが選ばれてベクトル空間が食い違いうる。
             result = await db.execute(
-                select(Model).where(Model.kind == "embedding", Model.is_enabled.is_(True))
+                select(Model)
+                .where(Model.kind == "embedding", Model.is_enabled.is_(True))
+                .order_by(Model.id)
             )
             embed_model = result.scalars().first()
             if embed_model is None:
@@ -101,6 +106,11 @@ async def index_document(document_id: int) -> None:
             await db.commit()
         except Exception:
             logger.warning("document_indexing_failed", document_id=document_id, exc_info=True)
-            await db.rollback()
-            document.status = "failed"
-            await db.commit()
+            try:
+                await db.rollback()
+                document.status = "failed"
+                await db.commit()
+            except Exception:
+                logger.warning(
+                    "document_indexing_failed_status_update_failed", document_id=document_id
+                )

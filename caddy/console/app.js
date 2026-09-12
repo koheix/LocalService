@@ -26,6 +26,7 @@ const settingsSaved = document.getElementById("settings-saved");
 let currentConversationId = null;
 let conversations = [];
 let currentUserId = null;
+let currentUserRole = null;
 let documents = [];
 let documentPollTimer = null;
 
@@ -64,6 +65,7 @@ async function checkAuthAndInit() {
     const me = await api("/api/auth/me");
     whoami.textContent = me.email;
     currentUserId = me.id;
+    currentUserRole = me.role;
     showApp();
     await Promise.all([loadModels(), loadConversations(), loadDocuments()]);
   } catch {
@@ -336,7 +338,7 @@ function renderDocumentList() {
     status.textContent = STATUS_LABEL[d.status] || d.status;
     li.appendChild(status);
 
-    if (d.owner_id === currentUserId) {
+    if (d.owner_id === currentUserId || currentUserRole === "admin") {
       const delBtn = document.createElement("button");
       delBtn.type = "button";
       delBtn.className = "doc-delete-btn";

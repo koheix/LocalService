@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     chunk_size_chars: int = 1000
     chunk_overlap_chars: int = 200
     rag_top_k: int = 4
+    # コサイン距離(0=完全一致〜2=正反対)。これより遠ければ「関係ない質問」とみなしLLMを呼ばない。
+    rag_distance_threshold: float = 0.6
 
 
 @lru_cache
