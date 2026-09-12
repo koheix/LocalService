@@ -19,22 +19,43 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import hash_password
-from app.backends.base import BackendHealth
+from app.backends.base import BackendHealth, InferenceBackend
 from app.db import async_session_maker
+from app.limits import concurrency_slots, rate_limiter
 from app.main import app
-from app.models import Model, ModelPermission, User
+from app.models import Model, ModelPermission, Quota, User
 
 
 class FakeBackend:
-    """テスト用のバックエンド。実際の Ollama を呼ばない。"""
+    """テスト用のバックエンド。実際の Ollama を呼ばない。
+
+    受け取った payload を chat_calls/chat_stream_calls/embed_calls に
+    記録するため、テスト側で「バックエンドに実際に何が送られたか」
+    (served_name→backend_name変換、system_prompt、temperature等)を
+    検証できる。chat_stream_chunks は差し替え可能にして、複数チャンクへの
+    分割や usage 欠落などの異常系もテストできるようにしている。
+    """
+
+    def __init__(self) -> None:
+        self.chat_calls: list[dict] = []
+        self.chat_stream_calls: list[dict] = []
+        self.embed_calls: list[tuple[list[str], str]] = []
+        self.chat_stream_chunks: list[bytes] = [
+            b'data: {"model":"fake-backend-model","choices":[{"delta":{"content":"fake"}}]}\n\n',
+            b'data: {"model":"fake-backend-model","choices":[{"delta":{}}],'
+            b'"usage":{"prompt_tokens":5,"completion_tokens":3}}\n\n',
+            b"data: [DONE]\n\n",
+        ]
 
     async def list_models(self) -> list:
         return []
 
     async def chat(self, payload: dict) -> dict:
+        self.chat_calls.append(payload)
         return {
             "id": "fake",
             "object": "chat.completion",
+            "model": payload.get("model", ""),
             "choices": [
                 {
                     "index": 0,
@@ -46,12 +67,12 @@ class FakeBackend:
         }
 
     async def chat_stream(self, payload: dict):
-        yield b'data: {"choices":[{"delta":{"content":"fake"}}]}\n\n'
-        usage = '{"prompt_tokens":5,"completion_tokens":3}'
-        yield f'data: {{"choices":[{{"delta":{{}}}}],"usage":{usage}}}\n\n'.encode()
-        yield b"data: [DONE]\n\n"
+        self.chat_stream_calls.append(payload)
+        for chunk in self.chat_stream_chunks:
+            yield chunk
 
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+        self.embed_calls.append((texts, model))
         return [[0.0] * 1024 for _ in texts]
 
     async def health(self) -> BackendHealth:
@@ -62,12 +83,39 @@ class FakeBackend:
 
 
 @pytest.fixture(autouse=True)
-def _fake_backends(monkeypatch: pytest.MonkeyPatch) -> None:
+def fake_backend(monkeypatch: pytest.MonkeyPatch) -> FakeBackend:
     fake = FakeBackend()
+    assert isinstance(fake, InferenceBackend)
+
     for mod in ("app.routers.v1", "app.routers.conversations", "app.routers.admin"):
         monkeypatch.setattr(f"{mod}.get_chat_backend", lambda: fake)
     for mod in ("app.routers.v1", "app.routers.admin"):
         monkeypatch.setattr(f"{mod}.get_embed_backend", lambda: fake)
+
+    # パッチが実際に効いていることをここで確認する。将来 import の形が
+    # 変わってパッチが効かなくなった場合、テストが実Ollamaに到達して
+    # タイムアウトする前にここで気づけるようにする。
+    import app.routers.admin as admin_mod
+    import app.routers.conversations as conv_mod
+    import app.routers.v1 as v1_mod
+
+    assert v1_mod.get_chat_backend() is fake
+    assert v1_mod.get_embed_backend() is fake
+    assert conv_mod.get_chat_backend() is fake
+    assert admin_mod.get_chat_backend() is fake
+    assert admin_mod.get_embed_backend() is fake
+
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_limits() -> None:
+    """app.limits のシングルトンはプロセス共有なので、テスト間で状態を持ち越さない。"""
+    rate_limiter._hits.clear()
+    concurrency_slots._counts.clear()
+    yield
+    rate_limiter._hits.clear()
+    concurrency_slots._counts.clear()
 
 
 @pytest_asyncio.fixture
@@ -81,8 +129,8 @@ async def client() -> AsyncIterator[AsyncClient]:
 def new_client() -> Callable[[], AsyncClient]:
     """Cookie を共有しない新しい AsyncClient を作るファクトリ。
 
-    Bearer 認証(APIキー)がセッションCookieに依存していないことを
-    確認する際に使う。
+    Bearer 認証(APIキー)がセッションCookieに依存していないことや、
+    サーバー側のセッション失効を確認する際に使う。
     """
 
     def _make() -> AsyncClient:
@@ -141,6 +189,17 @@ async def make_model(
         await db.commit()
         await db.refresh(model)
         return model
+
+    return _make
+
+
+@pytest_asyncio.fixture
+async def make_quota(db: AsyncSession) -> Callable[..., Awaitable[Quota]]:
+    async def _make(user_id: int, *, rpm_limit: int = 60, max_concurrent: int = 2) -> Quota:
+        quota = Quota(user_id=user_id, rpm_limit=rpm_limit, max_concurrent=max_concurrent)
+        db.add(quota)
+        await db.commit()
+        return quota
 
     return _make
 

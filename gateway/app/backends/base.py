@@ -5,7 +5,7 @@ Ollama と vLLM の差異はこのディレクトリ配下にのみ存在する�
 """
 
 from collections.abc import AsyncIterator
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -28,6 +28,7 @@ class ChatUsage(BaseModel):
     completion_tokens: int = 0
 
 
+@runtime_checkable
 class InferenceBackend(Protocol):
     async def list_models(self) -> list[BackendModel]: ...
 
