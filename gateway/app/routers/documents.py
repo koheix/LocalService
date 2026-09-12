@@ -28,7 +28,12 @@ _UPLOAD_READ_CHUNK_SIZE = 1024 * 1024  # 1MB
 
 
 async def _read_upload_within_limit(file: UploadFile, max_size: int) -> bytes:
-    """上限を超えた時点で打ち切り、上限超のファイル全体をメモリに載せない。"""
+    """上限を超えた時点で打ち切る。
+
+    Starlette は multipart 本体を先に受信済み(SpooledTemporaryFile)のため
+    リクエスト受信自体を早期中断するわけではないが、上限超のファイルを
+    それとは別にもう一箇所(bytesオブジェクト)へ丸ごとコピーすることは避ける。
+    """
     chunks: list[bytes] = []
     total = 0
     while True:

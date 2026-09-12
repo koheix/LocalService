@@ -15,6 +15,7 @@ import structlog
 from docx import Document as DocxDocument
 from pypdf import PdfReader
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.backends import get_embed_backend
 from app.config import get_settings
@@ -22,6 +23,20 @@ from app.db import async_session_maker
 from app.models import Chunk, Document, Model
 
 logger = structlog.get_logger()
+
+
+async def pick_enabled_model(db: AsyncSession, kind: str) -> Model | None:
+    """kind一致・有効なモデルをid昇順で1件選ぶ。
+
+    インデックス時(index_document)と検索時(routers/rag.py)の両方が
+    この関数だけを経由する。選択規則を2箇所に別々に実装すると、片方だけ
+    変更されたときに埋め込みモデルが食い違い、ベクトル空間の不一致で
+    検索結果が静かに壊れる(実際に過去そうなっていた)。
+    """
+    result = await db.execute(
+        select(Model).where(Model.kind == kind, Model.is_enabled.is_(True)).order_by(Model.id)
+    )
+    return result.scalars().first()
 
 
 def _extract_text(path: Path, ext: str) -> str:
@@ -76,15 +91,7 @@ async def index_document(document_id: int) -> None:
             if not chunks:
                 raise ValueError("文書からテキストを抽出できませんでした")
 
-            # id 昇順で固定する。ORDER BY が無いと、検索時(routers/rag.py の
-            # _pick_permitted_model も同じ規則で id 昇順にしてある)と異なる
-            # モデルが選ばれてベクトル空間が食い違いうる。
-            result = await db.execute(
-                select(Model)
-                .where(Model.kind == "embedding", Model.is_enabled.is_(True))
-                .order_by(Model.id)
-            )
-            embed_model = result.scalars().first()
+            embed_model = await pick_enabled_model(db, "embedding")
             if embed_model is None:
                 raise ValueError("埋め込み用モデルが設定されていません")
 

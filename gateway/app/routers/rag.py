@@ -6,7 +6,10 @@
 
 埋め込み推論・チャット推論のいずれも `/api/v1` 経由の推論と同様に
 レート制限・同時実行スロット・usage_logs記録の対象とする(CLAUDE.md
-非交渉事項#3)。
+非交渉事項#3)。ただし処理順序は `/api/v1` (存在確認→権限→レート制限→
+スロット)とは異なり、レート制限・スロットをモデル解決より先に行う
+(埋め込みモデル解決にもDBアクセスがあるため、権限の無いユーザーからの
+リクエストでも先に安価なレート制限で弾けるようにするため)。
 """
 
 import asyncio
@@ -25,6 +28,7 @@ from app.deps import AuthContext, current_auth
 from app.errors import AppError, NotFoundError, PermissionError_, RateLimitError
 from app.limits import concurrency_slots, rate_limiter
 from app.models import Chunk, Document, Model, ModelPermission, Quota, UsageLog, User
+from app.rag import pick_enabled_model
 
 router = APIRouter(prefix="/api/rag", tags=["rag"])
 
@@ -48,13 +52,11 @@ class RagQueryResponse(BaseModel):
 
 
 async def _pick_permitted_model(db: AsyncSession, user: User, kind: str) -> Model:
-    # ORDER BY が無いと有効なモデルが複数ある場合に選ばれるモデルが
-    # 不定になり、インデックス時と検索時で埋め込みモデルが食い違って
-    # 検索結果が静かに壊れうる。id 昇順で固定する。
-    result = await db.execute(
-        select(Model).where(Model.kind == kind, Model.is_enabled.is_(True)).order_by(Model.id)
-    )
-    model = result.scalars().first()
+    # モデル選択規則(id昇順で最初の有効なモデル)は app.rag.pick_enabled_model に
+    # 一本化してある。index_document(app/rag.py)と別実装にすると、埋め込み
+    # モデルが検索時とインデックス時で食い違い、ベクトル空間の不一致で
+    # 検索結果が静かに壊れる(過去に実際そうなっていた)。
+    model = await pick_enabled_model(db, kind)
     if model is None:
         raise NotFoundError(f"利用可能な{kind}モデルがありません")
 

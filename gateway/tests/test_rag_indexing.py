@@ -6,7 +6,7 @@ ASYNC(ruff)対策として async テスト内では asyncio.to_thread 経由に�
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from io import BytesIO
 from pathlib import Path
 
@@ -15,6 +15,7 @@ from docx import Document as DocxDocument
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import Chunk, Document, Model
 from app.rag import _chunk_text, _extract_text, index_document
 from tests.conftest import FakeBackend
@@ -67,6 +68,14 @@ def test_chunk_text_overlap_boundary_literal() -> None:
     # 隣接チャンクが overlap 分だけ重なっていること
     assert result[0][-3:] == result[1][:3]
     assert result[1][-3:] == result[2][:3]
+
+
+def test_chunk_text_overlap_greater_equal_chunk_size_steps_by_one() -> None:
+    """overlap >= chunk_size のとき、step = max(1, chunk_size - overlap) が
+
+    1にクランプされ、無限ループにならず1文字刻みで進むこと。"""
+    result = _chunk_text("abcde", chunk_size=2, overlap=5)
+    assert result == ["ab", "bc", "cd", "de"]
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +136,16 @@ async def test_index_document_happy_path_creates_embedded_chunks(
     db: AsyncSession,
     login_as_new_user: Callable,
     make_model: Callable,
+    isolate_model: Callable[[Model], Awaitable[None]],
     tmp_path: Path,
     fake_backend: FakeBackend,
 ) -> None:
     user = await login_as_new_user()
-    await make_model(kind="embedding")  # 有効なembeddingモデルが最低1つ必要
+    # id昇順で最初の有効モデルが選ばれるため、isolateしないとseedの
+    # embed-standardが使われてしまい、このテストが作ったモデルが実際には
+    # 使われないまま緑になる(過去そうだった)。
+    embed_model = await make_model(kind="embedding")
+    await isolate_model(embed_model)
 
     path = tmp_path / "note.txt"
     await _write_bytes(path, b"0123456789ABCDEFGHIJ")
@@ -149,7 +163,8 @@ async def test_index_document_happy_path_creates_embedded_chunks(
     assert len(chunks) == 1  # 既定のchunk_size(1000)なので短文は1チャンクに収まる
     assert chunks[0].content == "0123456789ABCDEFGHIJ"
     assert len(chunks[0].embedding) == 1024
-    assert fake_backend.embed_calls  # 実際に埋め込みバックエンドが呼ばれたこと
+    # このテストが作った embed_model が実際に使われたこと(値・引数とも)。
+    assert fake_backend.embed_calls == [(["0123456789ABCDEFGHIJ"], embed_model.backend_name)]
 
 
 async def test_index_document_missing_file_marks_failed(
@@ -228,11 +243,13 @@ async def test_index_document_is_idempotent_on_rerun(
     db: AsyncSession,
     login_as_new_user: Callable,
     make_model: Callable,
+    isolate_model: Callable[[Model], Awaitable[None]],
     tmp_path: Path,
 ) -> None:
     """再実行してもchunksが重複せず、常に最新の抽出結果で置き換わること。"""
     user = await login_as_new_user()
-    await make_model(kind="embedding")
+    embed_model = await make_model(kind="embedding")
+    await isolate_model(embed_model)
 
     path = tmp_path / "note.txt"
     await _write_bytes(path, b"0123456789ABCDEFGHIJ")
@@ -244,3 +261,79 @@ async def test_index_document_is_idempotent_on_rerun(
     result = await db.execute(select(Chunk).where(Chunk.document_id == document.id))
     chunks = result.scalars().all()
     assert len(chunks) == 1  # 2回実行しても1件のまま(delete→insertで置き換わる)
+
+
+class IndexedEmbedBackend(FakeBackend):
+    """i番目のテキストに対し、index i成分だけ1.0の見分けやすいベクトルを返す。
+
+    ordinal・content・embeddingの対応がずれていないかを検証するための道具。
+    """
+
+    async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+        self.embed_calls.append((texts, model))
+        vectors = []
+        for i in range(len(texts)):
+            v = [0.0] * 1024
+            v[i] = 1.0
+            vectors.append(v)
+        return vectors
+
+
+async def test_index_document_multi_chunk_ordinal_content_embedding_correspondence(
+    db: AsyncSession,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """複数チャンクがある場合に、ordinal・content・embeddingの対応がずれないこと。
+
+    確認済みの意図: app/rag.py の `zip(chunks, embeddings, strict=True)` の
+    対応を(例えば embeddings 側だけ逆順にするなどして)ずらすと、本テストの
+    embedding 側アサーションが失敗する。1チャンクのテストだけでは
+    この種の対応ずれ(検索結果が静かに壊れる、最も致命的なバグ形)を検知できない。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    await isolate_model(embed_model)
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "chunk_size_chars", 10)
+    monkeypatch.setattr(settings, "chunk_overlap_chars", 3)
+
+    path = tmp_path / "note.txt"
+    await _write_bytes(path, b"0123456789ABCDEFGHIJ")
+    document = await _make_pending_document(db, user.id, path)
+
+    fake = IndexedEmbedBackend()
+    monkeypatch.setattr("app.rag.get_embed_backend", lambda: fake)
+
+    await index_document(document.id)
+
+    await db.refresh(document)
+    assert document.status == "ready"
+
+    result = await db.execute(
+        select(Chunk).where(Chunk.document_id == document.id).order_by(Chunk.ordinal)
+    )
+    chunks = result.scalars().all()
+    assert [c.content for c in chunks] == ["0123456789", "789ABCDEFG", "EFGHIJ"]
+    for i, chunk in enumerate(chunks):
+        assert chunk.ordinal == i
+        assert chunk.embedding[i] == pytest.approx(1.0)
+        others = [chunk.embedding[j] for j in range(len(chunks)) if j != i]
+        assert all(v == pytest.approx(0.0) for v in others)
+
+    assert fake.embed_calls[0][1] == embed_model.backend_name
+
+
+async def test_index_document_nonexistent_id_is_noop(db: AsyncSession) -> None:
+    """存在しない document_id を渡しても例外を投げず、早期returnすること。"""
+    result_before = await db.execute(select(Chunk))
+    count_before = len(result_before.scalars().all())
+
+    await index_document(999_999_999)
+
+    result_after = await db.execute(select(Chunk))
+    assert len(result_after.scalars().all()) == count_before

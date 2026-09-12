@@ -58,6 +58,16 @@ async def test_delete_requires_auth(client: AsyncClient) -> None:
     assert resp.status_code == 401
 
 
+async def test_upload_extension_check_is_case_insensitive(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    await login_as_new_user()
+    resp = await client.post(
+        "/api/documents", files={"file": ("pytest-note.TXT", b"hello", "text/plain")}
+    )
+    assert resp.status_code == 201
+
+
 async def test_upload_rejects_unsupported_extension(
     client: AsyncClient, login_as_new_user: Callable
 ) -> None:
@@ -84,6 +94,20 @@ async def test_upload_rejects_oversized_file(
 
     listed = await client.get("/api/documents")
     assert all(d["filename"] != "pytest-huge.txt" for d in listed.json())
+
+
+async def test_upload_accepts_file_at_exact_size_limit(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    """上限ちょうどのファイルは拒否されないこと(境界値、>=ではなく>で判定)。"""
+    await login_as_new_user()
+    settings = get_settings()
+    exact = b"x" * settings.max_upload_size_bytes
+
+    resp = await client.post(
+        "/api/documents", files={"file": ("pytest-exact.txt", exact, "text/plain")}
+    )
+    assert resp.status_code == 201
 
 
 async def test_upload_triggers_indexing_with_correct_document_id(
