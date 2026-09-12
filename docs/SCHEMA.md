@@ -93,6 +93,30 @@ CREATE TABLE quotas (
   max_concurrent     INTEGER NOT NULL DEFAULT 2
 );
 
+-- Phase 1: プレイグラウンド（会話履歴・システムプロンプト・パラメータ保存）
+CREATE TABLE conversations (
+  id             BIGSERIAL PRIMARY KEY,
+  user_id        BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title          TEXT NOT NULL DEFAULT '',
+  model_id       BIGINT REFERENCES models(id) ON DELETE SET NULL,
+  system_prompt  TEXT NOT NULL DEFAULT '',
+  temperature    REAL NOT NULL DEFAULT 0.7,
+  top_p          REAL NOT NULL DEFAULT 1.0,
+  max_tokens     INTEGER,        -- NULL = バックエンド既定値
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ON conversations (user_id, updated_at DESC);
+
+CREATE TABLE messages (
+  id               BIGSERIAL PRIMARY KEY,
+  conversation_id  BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role             TEXT NOT NULL CHECK (role IN ('system','user','assistant')),
+  content          TEXT NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ON messages (conversation_id, id);
+
 -- RAG（Phase 2 で使用、定義は先に作る）
 CREATE EXTENSION IF NOT EXISTS vector;
 

@@ -42,6 +42,13 @@ Ollama をもう1つ立てれば API が完全に同一になり、実装を共�
 **理由** — モデルを差し替えても、繋ぎ込んだ外部ツールやアプリのコードを変更せずに済む。
 `chat-standard` という名前のまま、中身を `qwen3:4b` から別モデルに変えられる。
 
+**適用範囲の確認(T-14で発覚)** — `/api/conversations` を最初に実装した際、
+誤って内部主キー `model_id` をリクエスト/レスポンスに直接使っていた。
+`/api/v1/models` は `served_name` しか返さないため、UIがモデルを指定
+できなくなる不整合だった。T-14着手時に気づき、`conversations` API も
+`model`(served_name文字列)でやり取りするよう修正し、内部でのみ
+`model_id` に変換するようにした。
+
 ---
 
 ## D-004 gateway で推論を直列化しない
@@ -73,3 +80,176 @@ gateway 側で直列化するとスループットが大幅に落ちる。並列
 
 **理由** — 後から差し込むと全アプリのリクエスト経路を書き直すことになる。
 一方 Prometheus / Grafana / Redis は後付けが容易なので Phase 0 では入れない。
+
+---
+
+## D-007 NVIDIA Container Toolkit のリポジトリは distro 非依存の stable/deb を使う
+
+**背景** — `scripts/setup-host.sh` で当初 `libnvidia-container/ubuntu24.04/libnvidia-container.list`
+という distro 別パスを指定していたが、`curl` が 404 を返してインストールに失敗した。
+
+**判断** — distro 別パスではなく、NVIDIA が現在案内している distro 非依存の
+`https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list`
+を使う。
+
+**理由** — NVIDIA は distro 別のリポジトリ一覧（`ubuntu24.04` 等）を廃止し、
+`stable/deb` 配下の共通リポジトリに一本化している。Docker 側のリポジトリ指定
+（`noble` 固定）とは別物であり、こちらは codename/distro 指定が不要になった。
+
+**影響** — `scripts/setup-host.sh` の NVIDIA Container Toolkit 導入部分のみ修正。
+Docker Engine 側の `noble` 固定は変更なし。
+
+---
+
+## D-008 Alembic はコンソールスクリプトではなく `python -m alembic` で呼ぶ
+
+**背景** — `docker compose exec gateway alembic upgrade head` を実行すると
+`ModuleNotFoundError: No module named 'app'` で失敗した。
+
+**理由** — pip がインストールする `alembic` コンソールスクリプトは
+`sys.path[0]` にスクリプト自身の置き場所（`/usr/local/bin`）を積む。
+WORKDIR の `/app` はカレントディレクトリではあっても `sys.path` には
+含まれないため、`gateway/alembic/env.py` の `from app.config import ...` が
+解決できない。`python -m alembic ...` で起動すると `sys.path[0]` が
+カレントディレクトリ（`''` → `/app`）になり解決できる。
+
+**判断** — `Makefile` の `migrate` / `revision` ターゲットを
+`docker compose exec gateway python -m alembic ...` に統一する。
+今後 gateway コンテナ内で alembic を直接呼ぶ場合も同様にすること。
+
+---
+
+## D-009 セッションは失効時に物理削除する
+
+**判断** — ログアウト時・期限切れ検出時ともに `sessions` 行を `DELETE` する。
+論理削除用の `revoked_at` カラムは追加しない。
+
+**理由** — `docs/SCHEMA.md` の `sessions` テーブル定義に `revoked_at` が
+存在せず、追加するとスキーマ変更が必要になる。同時利用1名の検証機では
+セッション監査証跡の必要性が薄く、実装を単純に保つ方を優先した。
+ユーザーに確認済み。
+
+## D-010 APIキーは `sk-` 全体を Argon2id でハッシュする
+
+**判断** — API キーは `sk-<32byteランダム>` を発行し、`key_hash` には
+キー全体を Argon2id でハッシュしたものを保存する。検証時は
+`key_prefix`（先頭8文字）で候補行を絞り込んでから Argon2 verify する。
+
+**理由** — `docs/SCHEMA.md` の `api_keys.key_hash` に `-- Argon2id` と
+明記されている。SHA-256 等の高速ハッシュは DB 漏洩時により安全側だが、
+仕様に反するためユーザーに確認のうえ Argon2id を採用した。
+リクエスト毎に Argon2 検証のコストがかかる点は Phase 0（同時利用1名）
+では許容範囲と判断。将来ボトルネックになる場合は候補を減らす
+（key_prefix の桁数を増やす等）対応を検討する。
+
+---
+
+## D-011 usage_logs のベストエフォート範囲は「記録処理」に限る
+
+**背景** — T-08 の完了条件に「DB を停止した状態でも推論が成功し、警告ログ
+だけが出る」とあるが、認証（セッション/APIキー検証）自体が `users` /
+`sessions` / `api_keys` テーブルへの問い合わせに依存しているため、
+DB を完全に停止すると認証の時点で `500` になり、推論まで到達できない。
+
+**判断** — 「ログ記録の失敗が推論レスポンスを壊してはならない」という
+非交渉事項は、**usage_logs への書き込み処理そのもの**に限定して適用する。
+認証・モデル存在確認・権限チェックが DB に依存すること自体は許容する
+（D-006「認証は最初から入れる」と両立しない代替手段がないため）。
+`_record_usage()` は例外を握って warn ログのみ出し、呼び出し元に伝播
+させない設計とし、これを直接 DB 停止状態で呼び出して例外が出ないことを
+確認した。
+
+## D-012 ストリーミング応答のログ書き込みは `asyncio.shield` で保護する
+
+**背景** — ストリーミング応答が完了しクライアントが切断すると、
+その応答を生成している ASGI タスクがキャンセルされる。`finally` 節で
+`await _record_usage(...)` を呼んでいても、`asyncio.CancelledError` は
+`Exception` を継承していない（`BaseException` 直下）ため、
+`except Exception` では捕まらず、DB 書き込みが完了する前に中断されて
+usage_logs に記録が残らなかった。
+
+**判断** — ストリーミング完了時・非ストリーミング完了時の両方で、
+`_record_usage(...)` の呼び出しを `asyncio.shield(...)` で包み、
+親タスクがキャンセルされてもログ書き込みタスク自体は最後まで実行させる。
+
+**理由** — ログ記録はクライアントの生死に関わらず必ず残したい
+（利用実績の集計・不正利用検知の基礎データになるため）。shield は
+無制限に待ち続けるリスクはあるが、DB 書き込み自体は数十ms程度で
+完了する想定であり Phase 0 では許容する。
+
+---
+
+## D-013 gateway コンテナに NVIDIA の utility capability のみ付与する
+
+**背景** — `GET /api/admin/gpu` で実際の VRAM 使用量を返すには、
+gateway コンテナから `nvidia-smi` を実行できる必要がある。しかし
+`ollama` サービスのように `capabilities: [gpu]` を付与すると、
+CUDA 計算能力まで要求してしまい「VRAM は LLM 専有」という
+ハード制約（D-001/D-002）と衝突しかねない。
+
+**判断** — `docker-compose.yml` の `gateway` サービスに
+`NVIDIA_DRIVER_CAPABILITIES: utility` と
+`deploy.resources.reservations.devices[].capabilities: [utility]` を
+追加した。`gpu`(compute) ではなく `utility` のみを要求することで、
+ドライバライブラリと `nvidia-smi` バイナリだけがコンテナに注入され、
+VRAM 確保は発生しない。
+
+**確認** — gateway コンテナ内で `nvidia-smi` が実行でき、実際の
+使用量(MiB)を返すことを確認済み。バイナリが無い/失敗するケースの
+フォールバック(`available: false`)も、存在しないコマンド名を使って
+`FileNotFoundError`(`OSError` 派生)が捕捉されることを確認した。
+
+---
+
+## D-014 console(Web UI)をPhase 1に前倒しし、ビルド不要の静的サイトにする
+
+**背景** — `CLAUDE.md`/`docs/ARCHITECTURE.md` は当初「console(Web UI)は
+Phase 2以降、それまでは `/api/docs` で操作する」としていたが、
+`docs/TASKS.md` の Phase 1 タスク一覧には「モデル選択つきチャットUI」が
+既に含まれており矛盾していた。ユーザーに確認し、Phase 1 の時点で
+実際に Web UI（プレイグラウンド）を作ることに決定した。
+
+**判断**
+- console は Phase 1 から着手する（`CLAUDE.md`/`ARCHITECTURE.md` を修正）。
+- フロントエンドはビルド不要の静的 HTML/CSS/Vanilla JS とする
+  （React/Vue 等のビルドチェーンは導入しない）。
+- 専用コンテナは立てず、`proxy`(Caddy) が `caddy/console/` 配下の
+  静的ファイルを直接配信する。`/api/*` は従来どおり `gateway` へ。
+
+**理由** — 検証機は小型GPUサーバー1台で完結させる方針であり、
+Node.js ビルド環境やSPAフレームワークの複雑さを持ち込むメリットが
+Phase 1 の時点では薄い。fetch API + テンプレート関数で十分な規模。
+Caddy は既に `file_server` を持つため、専用コンテナを増やさずに済む。
+ユーザーに確認済み。
+
+**影響** — Phase 1 のタスクを T-11〜T-14 として `docs/TASKS.md` に
+分解した。会話履歴・システムプロンプト保存用に `conversations` /
+`messages` テーブルを新設する（T-11、`docs/SCHEMA.md` に追記）。
+
+---
+
+## D-015 未配線の設定値（`SECRET_KEY` / `ENABLE_PROMPT_LOGGING`）を記録する
+
+**背景** — pr-reviewer のレビューで、`config.py` に定義されているものの
+実コードから一度も参照されていない設定値が指摘された。`LOG_LEVEL` は
+`main.py` の `_configure_logging()` で structlog/標準loggingに反映する
+よう対応したが、以下の2つは Phase 1 時点でも未実装のまま残る。
+
+- **`SECRET_KEY`** — 用途が無い。セッション/APIキーの検証は
+  Argon2ハッシュとDB照合のみで完結しており（D-009, D-010）、
+  署名やCSRFトークンなどSECRET_KEYを要する仕組みは未実装。
+- **`ENABLE_PROMPT_LOGGING`** — `.env.example` のコメントは
+  「trueにするとusage_logsに本文が残る」としているが、実際には
+  usage_logsテーブルにprompt本文を保存するカラム自体が無く、
+  このフラグをtrueにしても何も起きない（＝安全側だが説明と実装が
+  乖離している）。
+
+**判断** — Phase 1 では実装しない。認証・ログ記録は「本文を残さない」
+という非交渉事項に忠実な現状の設計を優先し、SECRET_KEYの用途や
+プロンプト本文の一時保存機構を Phase 0/1 の場当たり的な追加では
+作らない。どちらも認証・ログ設計に関わる判断のため、実装する場合は
+着手前にユーザーへ仕様確認する（CLAUDE.mdの方針どおり）。
+
+**影響** — `.env.example` の `ENABLE_PROMPT_LOGGING` コメントは
+「安全側のプレースホルダで、現状は本文を保存する経路自体が無い」と
+読み替えること。

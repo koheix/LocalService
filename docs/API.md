@@ -71,6 +71,42 @@ OpenAI 準拠。バックエンドは `ollama-embed`（CPU）に固定。
 
 ---
 
+## プレイグラウンド（会話履歴）
+
+自分が所有する会話のみ操作できる。他ユーザーの会話IDを指定した場合は
+存在の有無を漏らさないため `403` ではなく `404` を返す。
+
+### `GET /api/conversations`
+自分の会話一覧を `updated_at` 降順で返す。
+
+### `POST /api/conversations`
+```json
+{ "title": "雑談", "model": "chat-standard",
+  "system_prompt": "簡潔に答えて", "temperature": 0.7,
+  "top_p": 1.0, "max_tokens": null }
+```
+`model` は `served_name`（`models.model_id` ではない。D-003）。すべて省略可。
+
+### `GET /api/conversations/{id}` / `PATCH /api/conversations/{id}` / `DELETE /api/conversations/{id}`
+`PATCH` は指定したフィールドのみ更新する（部分更新）。
+
+### `GET /api/conversations/{id}/messages`
+会話のメッセージ履歴を古い順で返す（`system` ロールは含まない設計だが、
+保存自体は `role` に `system/user/assistant` を許容する）。
+
+### `POST /api/conversations/{id}/messages`
+```json
+{ "content": "こんにちは" }
+```
+- ユーザーメッセージを先に保存してから推論する（推論が失敗してもユーザーの
+  入力は残る）
+- 会話に `model` が設定されていなければ `400`（`invalid_request_error`）
+- 処理順序・エラー・レート制限は `/api/v1/chat/completions` と同じ
+- 応答は常に `stream: true` 相当の SSE（`/api/v1` と同形式）。完了後に
+  アシスタント応答を保存し、`usage_logs` に `app: "playground"` で記録する
+
+---
+
 ## 管理（`admin` ロールのみ）
 
 ### `GET /api/admin/health`

@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     # 初期管理者（seed 用）
     admin_email: str = "admin@example.local"
-    admin_initial_password: str = "change-me"
+    admin_initial_password: str = "change-me-on-first-login"
 
     # 既定モデル（seed 用）
     default_chat_model: str = "qwen3:4b"

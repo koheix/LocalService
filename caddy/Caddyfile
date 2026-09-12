@@ -1,0 +1,10 @@
+:8080 {
+	handle /api/* {
+		reverse_proxy gateway:8000
+	}
+
+	handle {
+		root * /srv/console
+		file_server
+	}
+}
