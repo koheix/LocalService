@@ -121,7 +121,7 @@ c.chat.completions.create(model="chat-standard",
 ---
 
 ### T-10 疎通スクリプト
-- [ ] `make smoke` — GPU認識 → モデル応答 → ログイン → 推論 → ログ記録 を一気に検証
+- [x] `make smoke` — GPU認識 → モデル応答 → ログイン → 推論 → ログ記録 を一気に検証
 
 **完了条件**
 クリーンな状態から `make setup && make up && make pull-models && make migrate && make smoke`
