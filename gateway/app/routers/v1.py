@@ -8,7 +8,6 @@ usage_logs への記録は best-effort。記録の失敗が推論レスポンス
 """
 
 import asyncio
-import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -27,6 +26,7 @@ from app.deps import AuthContext, current_auth, current_user
 from app.errors import AppError, NotFoundError, PermissionError_, RateLimitError
 from app.limits import concurrency_slots, rate_limiter
 from app.models import Model, ModelPermission, Quota, UsageLog, User
+from app.sse import rewrite_chunk, with_stream_usage
 
 router = APIRouter(prefix="/api/v1", tags=["v1"])
 
@@ -99,22 +99,6 @@ async def _record_usage(
         logger.warning("usage_log_write_failed", user_id=user_id, status=status)
 
 
-def _extract_stream_usage(chunk: bytes, usage: dict[str, int]) -> None:
-    """SSEチャンクに usage オブジェクトが含まれていれば取り込む(ベストエフォート)。"""
-    for line in chunk.decode("utf-8", errors="ignore").splitlines():
-        line = line.strip()
-        if not line.startswith("data: ") or line == "data: [DONE]":
-            continue
-        try:
-            obj = json.loads(line[len("data: ") :])
-        except json.JSONDecodeError:
-            continue
-        obj_usage = obj.get("usage")
-        if obj_usage:
-            usage["prompt_tokens"] = obj_usage.get("prompt_tokens", 0)
-            usage["completion_tokens"] = obj_usage.get("completion_tokens", 0)
-
-
 @router.get("/models")
 async def list_models(
     user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
@@ -164,11 +148,11 @@ async def chat_completions(
                 first_chunk_at: float | None = None
                 usage: dict[str, int] = {}
                 try:
-                    async for chunk in backend.chat_stream(backend_payload):
+                    stream_payload = with_stream_usage(backend_payload)
+                    async for chunk in backend.chat_stream(stream_payload):
                         if first_chunk_at is None:
                             first_chunk_at = time.monotonic()
-                        _extract_stream_usage(chunk, usage)
-                        yield chunk
+                        yield rewrite_chunk(chunk, served_name, usage)
                 except Exception as exc:
                     stream_status = "error"
                     stream_error_code = type(exc).__name__
@@ -198,6 +182,7 @@ async def chat_completions(
         try:
             result = await backend.chat(backend_payload)
             usage = result.get("usage") or {}
+            result["model"] = served_name  # 内部実体名(backend_name)を漏らさない(D-003)
             return result
         finally:
             concurrency_slots.release(user.id)

@@ -30,6 +30,7 @@ from app.errors import (
 )
 from app.limits import concurrency_slots, rate_limiter
 from app.models import Conversation, Message, Model, ModelPermission, Quota, UsageLog, User
+from app.sse import rewrite_chunk, with_stream_usage
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -267,8 +268,8 @@ async def _record_usage(
         logger.warning("usage_log_write_failed", user_id=user_id, status=status)
 
 
-def _parse_stream_chunk(chunk: bytes, state: dict[str, Any]) -> None:
-    """SSEチャンクから content の断片と usage をベストエフォートで取り込む。"""
+def _extract_content(chunk: bytes, state: dict[str, Any]) -> None:
+    """SSEチャンクから content の断片をベストエフォートで取り込む(usageはrewrite_chunkが担う)。"""
     for line in chunk.decode("utf-8", errors="ignore").splitlines():
         line = line.strip()
         if not line.startswith("data: ") or line == "data: [DONE]":
@@ -282,10 +283,6 @@ def _parse_stream_chunk(chunk: bytes, state: dict[str, Any]) -> None:
             content = (choices[0].get("delta") or {}).get("content")
             if content:
                 state["content"] = state.get("content", "") + content
-        usage = obj.get("usage")
-        if usage:
-            state["prompt_tokens"] = usage.get("prompt_tokens", 0)
-            state["completion_tokens"] = usage.get("completion_tokens", 0)
 
 
 @router.post("/{conversation_id}/messages")
@@ -347,6 +344,7 @@ async def send_message(
     started_at = time.monotonic()
     conversation_id_ = conversation.id
     model_id_ = model.id
+    served_name_ = model.served_name
     api_key_id = ctx.api_key_id
     user_id = user.id
 
@@ -356,11 +354,12 @@ async def send_message(
         first_chunk_at: float | None = None
         state: dict[str, Any] = {}
         try:
-            async for chunk in backend.chat_stream(backend_payload):
+            stream_payload = with_stream_usage(backend_payload)
+            async for chunk in backend.chat_stream(stream_payload):
                 if first_chunk_at is None:
                     first_chunk_at = time.monotonic()
-                _parse_stream_chunk(chunk, state)
-                yield chunk
+                _extract_content(chunk, state)
+                yield rewrite_chunk(chunk, served_name_, state)
         except Exception as exc:
             stream_status = "error"
             stream_error_code = type(exc).__name__
