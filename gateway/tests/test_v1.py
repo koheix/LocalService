@@ -180,6 +180,103 @@ async def test_embeddings_wrong_kind_404(
     assert resp.status_code == 404
 
 
+async def test_embeddings_rate_limited_429(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable, make_quota: Callable
+) -> None:
+    user = await login_as_new_user()
+    model = await make_model(kind="embedding")
+    await make_quota(user.id, rpm_limit=1)
+
+    payload = {"model": model.served_name, "input": "hi"}
+    r1 = await client.post("/api/v1/embeddings", json=payload)
+    r2 = await client.post("/api/v1/embeddings", json=payload)
+    assert r1.status_code == 200
+    assert r2.status_code == 429
+    assert r2.json()["error"]["code"] == "RATE_LIMIT"
+
+
+async def test_embeddings_concurrency_limited_and_released(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    make_quota: Callable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await login_as_new_user()
+    model = await make_model(kind="embedding")
+    await make_quota(user.id, max_concurrent=1)
+
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    class BlockingEmbedBackend(FakeBackend):
+        async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+            self.embed_calls.append((texts, model))
+            started.set()
+            await release.wait()
+            return [[0.0] * 1024 for _ in texts]
+
+    blocking = BlockingEmbedBackend()
+    monkeypatch.setattr("app.routers.v1.get_embed_backend", lambda: blocking)
+
+    payload = {"model": model.served_name, "input": "hi"}
+    task = asyncio.create_task(client.post("/api/v1/embeddings", json=payload))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        resp2 = await asyncio.wait_for(client.post("/api/v1/embeddings", json=payload), timeout=5)
+        assert resp2.status_code == 429
+    finally:
+        release.set()
+        r1 = await asyncio.wait_for(task, timeout=5)
+    assert r1.status_code == 200
+
+    # スロットが解放された後は3本目が成功する(concurrency_slots.release()の検証)
+    resp3 = await asyncio.wait_for(client.post("/api/v1/embeddings", json=payload), timeout=5)
+    assert resp3.status_code == 200
+
+
+async def test_embeddings_usage_log_on_success(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable, db: AsyncSession
+) -> None:
+    user = await login_as_new_user()
+    model = await make_model(kind="embedding")
+
+    resp = await client.post("/api/v1/embeddings", json={"model": model.served_name, "input": "hi"})
+    assert resp.status_code == 200
+
+    result = await db.execute(
+        select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "api")
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 1
+    assert logs[0].status == "ok"
+    assert logs[0].model_id == model.id
+
+
+async def test_embeddings_usage_log_on_rate_limited(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    make_quota: Callable,
+    db: AsyncSession,
+) -> None:
+    user = await login_as_new_user()
+    model = await make_model(kind="embedding")
+    await make_quota(user.id, rpm_limit=1)
+
+    payload = {"model": model.served_name, "input": "hi"}
+    await client.post("/api/v1/embeddings", json=payload)
+    resp2 = await client.post("/api/v1/embeddings", json=payload)
+    assert resp2.status_code == 429
+
+    result = await db.execute(select(UsageLog).where(UsageLog.user_id == user.id))
+    logs = sorted(result.scalars().all(), key=lambda log: log.id)
+    assert len(logs) == 2
+    assert logs[1].status == "rate_limited"
+    assert logs[1].error_code == "RATE_LIMIT"
+
+
 # ---------------------------------------------------------------------------
 # レート制限・同時実行制限(429)
 # ---------------------------------------------------------------------------
@@ -251,12 +348,45 @@ async def test_chat_completions_concurrency_limited_429(
     try:
         await asyncio.wait_for(first_chunk_sent.wait(), timeout=5)
 
-        resp2 = await client.post("/api/v1/chat/completions", json=payload)
+        resp2 = await asyncio.wait_for(
+            client.post("/api/v1/chat/completions", json=payload), timeout=5
+        )
         assert resp2.status_code == 429
         assert resp2.json()["error"]["code"] == "RATE_LIMIT"
     finally:
         release.set()
-        await task
+        await asyncio.wait_for(task, timeout=5)
+
+    # 1本目が完了してスロットが解放された後は、3本目は成功すること
+    # (concurrency_slots.release() が実際に呼ばれていることの検証)
+    resp3 = await asyncio.wait_for(
+        client.post(
+            "/api/v1/chat/completions",
+            json={"model": model.served_name, "messages": [{"role": "user", "content": "hi"}]},
+        ),
+        timeout=5,
+    )
+    assert resp3.status_code == 200
+
+
+async def test_chat_completions_concurrency_slot_released_after_non_streaming_success(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    make_quota: Callable,
+) -> None:
+    """非ストリーミングでもconcurrency_slots.release()が呼ばれ、
+    上限max_concurrent=1でも逐次なら何度でも成功することを確認する。"""
+    user = await login_as_new_user()
+    model = await make_model()
+    await make_quota(user.id, max_concurrent=1)
+
+    payload = {"model": model.served_name, "messages": [{"role": "user", "content": "hi"}]}
+    for _ in range(3):
+        resp = await asyncio.wait_for(
+            client.post("/api/v1/chat/completions", json=payload), timeout=5
+        )
+        assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +505,88 @@ async def test_chat_completions_streaming_usage_log(
     assert logs[0].completion_tokens == 3
     assert logs[0].ttft_ms is not None
     assert logs[0].ttft_ms >= 0
+
+
+async def test_chat_completions_usage_log_records_api_key_id(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    new_client: Callable[[], AsyncClient],
+    db: AsyncSession,
+) -> None:
+    await login_as_new_user()
+    model = await make_model()
+    created = await client.post("/api/auth/api-keys", json={"name": "k"})
+    key_id = created.json()["id"]
+    raw_key = created.json()["key"]
+
+    async with new_client() as c2:
+        resp = await c2.post(
+            "/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {raw_key}"},
+            json={"model": model.served_name, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp.status_code == 200
+
+    result = await db.execute(select(UsageLog).where(UsageLog.api_key_id == key_id))
+    logs = result.scalars().all()
+    assert len(logs) == 1
+
+
+async def test_chat_completions_client_disconnect_still_logs_usage(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """クライアント切断等でリクエストのタスク自体がキャンセルされても、
+    asyncio.shieldによりusage_logsへの記録が失われないことを確認する
+    (v1.py._wrapped_stream の finally 節のコメントが指す挙動)。"""
+    user = await login_as_new_user()
+    model = await make_model()
+
+    started = asyncio.Event()
+
+    class SlowBackend(FakeBackend):
+        async def chat_stream(self, payload: dict):
+            self.chat_stream_calls.append(payload)
+            yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+            started.set()
+            await asyncio.sleep(30)  # 通常は到達しない。外側でタスクごとキャンセルする。
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr("app.routers.v1.get_chat_backend", lambda: SlowBackend())
+
+    async def do_request() -> None:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat/completions",
+            json={
+                "model": model.served_name,
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": True,
+            },
+        ) as resp:
+            async for _ in resp.aiter_bytes():
+                pass
+
+    task = asyncio.create_task(do_request())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # shieldされたバックグラウンドの書き込みが完了するのを少し待つ。
+    for _ in range(20):
+        result = await db.execute(select(UsageLog).where(UsageLog.user_id == user.id))
+        if result.scalars().all():
+            break
+        await asyncio.sleep(0.05)
+
+    result = await db.execute(select(UsageLog).where(UsageLog.user_id == user.id))
+    logs = result.scalars().all()
+    assert len(logs) == 1
 
 
 async def test_usage_log_write_failure_does_not_break_response(

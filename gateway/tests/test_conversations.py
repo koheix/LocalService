@@ -1,7 +1,9 @@
 """会話CRUDとチャット送信APIのテスト。バックエンドは FakeBackend。"""
 
+import asyncio
 from collections.abc import Callable
 
+import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -290,3 +292,87 @@ async def test_send_message_other_users_conversation_404(
 
     resp = await client.post(f"/api/conversations/{conv_id}/messages", json={"content": "hi"})
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# レート制限・同時実行制限(429)
+#
+# v1.py とは別実装のコピーなので、v1.py側のテストとは独立に検証する。
+# ---------------------------------------------------------------------------
+
+
+async def test_send_message_rate_limited_429(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable, make_quota: Callable
+) -> None:
+    user = await login_as_new_user()
+    model = await make_model()
+    await make_quota(user.id, rpm_limit=1)
+    created = await client.post("/api/conversations", json={"model": model.served_name})
+    conv_id = created.json()["id"]
+
+    async with client.stream(
+        "POST", f"/api/conversations/{conv_id}/messages", json={"content": "1"}
+    ) as r1:
+        assert r1.status_code == 200
+        async for _ in r1.aiter_bytes():
+            pass
+
+    resp2 = await client.post(f"/api/conversations/{conv_id}/messages", json={"content": "2"})
+    assert resp2.status_code == 429
+    assert resp2.json()["error"]["code"] == "RATE_LIMIT"
+
+
+async def test_send_message_concurrency_limited_and_released(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    make_quota: Callable,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await login_as_new_user()
+    model = await make_model()
+    await make_quota(user.id, max_concurrent=1)
+    created = await client.post("/api/conversations", json={"model": model.served_name})
+    conv_id = created.json()["id"]
+
+    release = asyncio.Event()
+    first_chunk_sent = asyncio.Event()
+
+    class BlockingBackend(FakeBackend):
+        async def chat_stream(self, payload: dict):
+            self.chat_stream_calls.append(payload)
+            yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+            first_chunk_sent.set()
+            await release.wait()
+            yield b"data: [DONE]\n\n"
+
+    blocking = BlockingBackend()
+    monkeypatch.setattr("app.routers.conversations.get_chat_backend", lambda: blocking)
+
+    async def hold_first() -> None:
+        async with client.stream(
+            "POST", f"/api/conversations/{conv_id}/messages", json={"content": "1"}
+        ) as resp:
+            assert resp.status_code == 200
+            async for _ in resp.aiter_bytes():
+                break
+
+    task = asyncio.create_task(hold_first())
+    try:
+        await asyncio.wait_for(first_chunk_sent.wait(), timeout=5)
+
+        resp2 = await asyncio.wait_for(
+            client.post(f"/api/conversations/{conv_id}/messages", json={"content": "2"}),
+            timeout=5,
+        )
+        assert resp2.status_code == 429
+        assert resp2.json()["error"]["code"] == "RATE_LIMIT"
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    # スロットが解放された後は成功する(concurrency_slots.release()の検証)。
+    resp3 = await asyncio.wait_for(
+        client.post(f"/api/conversations/{conv_id}/messages", json={"content": "3"}), timeout=5
+    )
+    assert resp3.status_code == 200

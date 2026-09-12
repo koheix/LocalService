@@ -18,7 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff>=0.7", "pytest>=8.3", "pytest-asyncio>=0.24", "openai>=1.54"]
+dev = [
+    "ruff>=0.7",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
+    "openai>=1.54",
+]
 
 [tool.ruff]
 line-length = 100
@@ -37,3 +43,6 @@ asyncio_mode = "auto"
 # セッション全体で1つのループを共有する。
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
+# 同時実行系のテストがデッドロックした場合に、CIを無限に固まらせず
+# 確実に赤にするためのグローバルセーフティネット。
+timeout = 30

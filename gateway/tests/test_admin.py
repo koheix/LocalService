@@ -1,11 +1,14 @@
 """管理API(/api/admin/*)のテスト。"""
 
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.backends.base import BackendHealth
+from app.models import UsageLog
 from tests.conftest import FakeBackend
 
 
@@ -233,3 +236,133 @@ async def test_update_model_permitted_roles(
     )
     assert patched.status_code == 200
     assert patched.json()["permitted_roles"] == ["admin"]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/usage
+# ---------------------------------------------------------------------------
+
+
+async def test_admin_usage_group_by_model_exact_counts(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable
+) -> None:
+    await login_as_new_user(role="admin")
+    model = await make_model()
+
+    for _ in range(2):
+        resp = await client.post(
+            "/api/v1/chat/completions",
+            json={"model": model.served_name, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp.status_code == 200
+
+    listed = await client.get(
+        "/api/admin/usage",
+        params={"from": "2020-01-01T00:00:00", "to": "2100-01-01T00:00:00", "group_by": "model"},
+    )
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["group_by"] == "model"
+    row = next(r for r in body["data"] if r["model"] == model.id)
+    assert row["request_count"] == 2
+    assert row["prompt_tokens"] == 10  # FakeBackendは1回あたりprompt_tokens=5
+    assert row["completion_tokens"] == 6  # 同completion_tokens=3
+
+
+async def test_admin_usage_group_by_user_exact_counts(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable
+) -> None:
+    user = await login_as_new_user(role="admin")
+    model = await make_model()
+    resp = await client.post(
+        "/api/v1/chat/completions",
+        json={"model": model.served_name, "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert resp.status_code == 200
+
+    listed = await client.get(
+        "/api/admin/usage",
+        params={"from": "2020-01-01T00:00:00", "to": "2100-01-01T00:00:00", "group_by": "user"},
+    )
+    assert listed.status_code == 200
+    row = next(r for r in listed.json()["data"] if r["user"] == user.id)
+    assert row["request_count"] == 1
+    assert row["prompt_tokens"] == 5
+    assert row["completion_tokens"] == 3
+
+
+async def test_admin_usage_date_range_boundaries(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable, db: AsyncSession
+) -> None:
+    user = await login_as_new_user(role="admin")
+    model = await make_model()
+
+    old_log = UsageLog(
+        user_id=user.id,
+        model_id=model.id,
+        app="api",
+        prompt_tokens=1,
+        completion_tokens=1,
+        latency_ms=1,
+        status="ok",
+        created_at=datetime.now(UTC) - timedelta(days=10),
+    )
+    db.add(old_log)
+    await db.commit()
+
+    # 直近1日の範囲には10日前のログは含まれない
+    recent = await client.get(
+        "/api/admin/usage",
+        params={
+            "from": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            "to": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "group_by": "model",
+        },
+    )
+    assert recent.status_code == 200
+    assert [r for r in recent.json()["data"] if r["model"] == model.id] == []
+
+    # 20日前からの範囲には含まれる
+    wide = await client.get(
+        "/api/admin/usage",
+        params={
+            "from": (datetime.now(UTC) - timedelta(days=20)).isoformat(),
+            "to": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "group_by": "model",
+        },
+    )
+    assert wide.status_code == 200
+    matching = [r for r in wide.json()["data"] if r["model"] == model.id]
+    assert len(matching) == 1
+    assert matching[0]["request_count"] == 1
+
+
+async def test_admin_usage_user_id_filter(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable
+) -> None:
+    user_a = await login_as_new_user(role="admin")
+    model = await make_model()
+    await client.post(
+        "/api/v1/chat/completions",
+        json={"model": model.served_name, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    user_b = await login_as_new_user(role="admin")
+    await client.post(
+        "/api/v1/chat/completions",
+        json={"model": model.served_name, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    filtered = await client.get(
+        "/api/admin/usage",
+        params={
+            "from": "2020-01-01T00:00:00",
+            "to": "2100-01-01T00:00:00",
+            "group_by": "user",
+            "user_id": user_a.id,
+        },
+    )
+    assert filtered.status_code == 200
+    users_in_result = {r["user"] for r in filtered.json()["data"]}
+    assert user_a.id in users_in_result
+    assert user_b.id not in users_in_result
