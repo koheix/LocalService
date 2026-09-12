@@ -294,45 +294,50 @@ async def test_admin_usage_group_by_user_exact_counts(
 async def test_admin_usage_date_range_boundaries(
     client: AsyncClient, login_as_new_user: Callable, make_model: Callable, db: AsyncSession
 ) -> None:
+    """from は含む(>=)、to は含まない(<)ことを、境界ちょうどの4件で厳密に確認する。
+
+    from-1秒/from/to/to+1秒 の4件を仕込み、[from, to) の範囲では
+    ちょうど1件(from の時刻のログ)だけがヒットするはず。
+    >= が > になったり、< が <= になったりすると件数がずれて検出できる。
+    """
     user = await login_as_new_user(role="admin")
     model = await make_model()
 
-    old_log = UsageLog(
-        user_id=user.id,
-        model_id=model.id,
-        app="api",
-        prompt_tokens=1,
-        completion_tokens=1,
-        latency_ms=1,
-        status="ok",
-        created_at=datetime.now(UTC) - timedelta(days=10),
+    base = datetime(2030, 1, 1, tzinfo=UTC)
+    window = timedelta(seconds=10)
+
+    def _log(offset: timedelta) -> UsageLog:
+        return UsageLog(
+            user_id=user.id,
+            model_id=model.id,
+            app="api",
+            prompt_tokens=1,
+            completion_tokens=1,
+            latency_ms=1,
+            status="ok",
+            created_at=base + offset,
+        )
+
+    db.add_all(
+        [
+            _log(-timedelta(seconds=1)),  # from の直前 → 範囲外
+            _log(timedelta(0)),  # ちょうど from → 含まれる(>=)
+            _log(window),  # ちょうど to → 含まれない(<)
+            _log(window + timedelta(seconds=1)),  # to の直後 → 範囲外
+        ]
     )
-    db.add(old_log)
     await db.commit()
 
-    # 直近1日の範囲には10日前のログは含まれない
-    recent = await client.get(
+    resp = await client.get(
         "/api/admin/usage",
         params={
-            "from": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
-            "to": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "from": base.isoformat(),
+            "to": (base + window).isoformat(),
             "group_by": "model",
         },
     )
-    assert recent.status_code == 200
-    assert [r for r in recent.json()["data"] if r["model"] == model.id] == []
-
-    # 20日前からの範囲には含まれる
-    wide = await client.get(
-        "/api/admin/usage",
-        params={
-            "from": (datetime.now(UTC) - timedelta(days=20)).isoformat(),
-            "to": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
-            "group_by": "model",
-        },
-    )
-    assert wide.status_code == 200
-    matching = [r for r in wide.json()["data"] if r["model"] == model.id]
+    assert resp.status_code == 200
+    matching = [r for r in resp.json()["data"] if r["model"] == model.id]
     assert len(matching) == 1
     assert matching[0]["request_count"] == 1
 

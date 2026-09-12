@@ -542,7 +542,11 @@ async def test_chat_completions_client_disconnect_still_logs_usage(
 ) -> None:
     """クライアント切断等でリクエストのタスク自体がキャンセルされても、
     asyncio.shieldによりusage_logsへの記録が失われないことを確認する
-    (v1.py._wrapped_stream の finally 節のコメントが指す挙動)。"""
+    (v1.py._wrapped_stream の finally 節のコメントが指す挙動)。
+
+    確認済み: v1.py の該当 asyncio.shield(...) を外して本テストのみ実行すると
+    `assert len(logs) == 1` が `0 == 1` で失敗する(records lost)。
+    元に戻すと成功する。"""
     user = await login_as_new_user()
     model = await make_model()
 
