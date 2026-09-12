@@ -10,7 +10,12 @@ from app.routers import auth
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="llm-console gateway")
+    app = FastAPI(
+        title="llm-console gateway",
+        docs_url="/api/docs",
+        redoc_url=None,
+        openapi_url="/api/openapi.json",
+    )
     register_error_handlers(app)
     app.include_router(auth.router)
 
