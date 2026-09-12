@@ -149,10 +149,10 @@ c.chat.completions.create(model="chat-standard",
 ---
 
 ### T-12 会話CRUD API
-- [ ] `GET/POST /api/conversations`
-- [ ] `GET/PATCH/DELETE /api/conversations/{id}`
-- [ ] `GET /api/conversations/{id}/messages`
-- [ ] 他ユーザーの会話は `404`（存在の有無を漏らさない）
+- [x] `GET/POST /api/conversations`
+- [x] `GET/PATCH/DELETE /api/conversations/{id}`
+- [x] `GET /api/conversations/{id}/messages`
+- [x] 他ユーザーの会話は `404`（存在の有無を漏らさない）
 
 **完了条件**
 自分の会話のみ一覧・取得・更新・削除でき、他ユーザーの会話IDを指定すると
