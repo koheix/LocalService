@@ -137,11 +137,11 @@ c.chat.completions.create(model="chat-standard",
 ---
 
 ### T-11 会話履歴スキーマ
-- [ ] `conversations` テーブル（user_id, title, model_id, system_prompt,
+- [x] `conversations` テーブル（user_id, title, model_id, system_prompt,
       temperature, top_p, max_tokens, created_at, updated_at）
-- [ ] `messages` テーブル（conversation_id, role, content, created_at）
-- [ ] `docs/SCHEMA.md` に追記
-- [ ] Alembic リビジョン追加
+- [x] `messages` テーブル（conversation_id, role, content, created_at）
+- [x] `docs/SCHEMA.md` に追記
+- [x] Alembic リビジョン追加
 
 **完了条件**
 `make migrate` 後、`\d conversations` `\d messages` で列が確認できる。

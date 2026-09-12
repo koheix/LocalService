@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -156,6 +157,48 @@ class Quota(Base):
     daily_token_limit: Mapped[int | None] = mapped_column(BigInteger)
     rpm_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="60")
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, server_default="2")
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    __table_args__ = (Index("ix_conversations_user_id_updated_at", "user_id", "updated_at"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    model_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("models.id", ondelete="SET NULL")
+    )
+    system_prompt: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    temperature: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.7")
+    top_p: Mapped[float] = mapped_column(Float, nullable=False, server_default="1.0")
+    max_tokens: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Message(Base):
+    __tablename__ = "messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('system','user','assistant')", name="ck_messages_role"),
+        Index("ix_messages_conversation_id_id", "conversation_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class Document(Base):
