@@ -225,3 +225,31 @@ Caddy は既に `file_server` を持つため、専用コンテナを増やさ�
 **影響** — Phase 1 のタスクを T-11〜T-14 として `docs/TASKS.md` に
 分解した。会話履歴・システムプロンプト保存用に `conversations` /
 `messages` テーブルを新設する（T-11、`docs/SCHEMA.md` に追記）。
+
+---
+
+## D-015 未配線の設定値（`SECRET_KEY` / `ENABLE_PROMPT_LOGGING`）を記録する
+
+**背景** — pr-reviewer のレビューで、`config.py` に定義されているものの
+実コードから一度も参照されていない設定値が指摘された。`LOG_LEVEL` は
+`main.py` の `_configure_logging()` で structlog/標準loggingに反映する
+よう対応したが、以下の2つは Phase 1 時点でも未実装のまま残る。
+
+- **`SECRET_KEY`** — 用途が無い。セッション/APIキーの検証は
+  Argon2ハッシュとDB照合のみで完結しており（D-009, D-010）、
+  署名やCSRFトークンなどSECRET_KEYを要する仕組みは未実装。
+- **`ENABLE_PROMPT_LOGGING`** — `.env.example` のコメントは
+  「trueにするとusage_logsに本文が残る」としているが、実際には
+  usage_logsテーブルにprompt本文を保存するカラム自体が無く、
+  このフラグをtrueにしても何も起きない（＝安全側だが説明と実装が
+  乖離している）。
+
+**判断** — Phase 1 では実装しない。認証・ログ記録は「本文を残さない」
+という非交渉事項に忠実な現状の設計を優先し、SECRET_KEYの用途や
+プロンプト本文の一時保存機構を Phase 0/1 の場当たり的な追加では
+作らない。どちらも認証・ログ設計に関わる判断のため、実装する場合は
+着手前にユーザーへ仕様確認する（CLAUDE.mdの方針どおり）。
+
+**影響** — `.env.example` の `ENABLE_PROMPT_LOGGING` コメントは
+「安全側のプレースホルダで、現状は本文を保存する経路自体が無い」と
+読み替えること。
