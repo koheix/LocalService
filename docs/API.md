@@ -107,6 +107,45 @@ OpenAI 準拠。バックエンドは `ollama-embed`（CPU）に固定。
 
 ---
 
+## 社内文書検索（RAG）
+
+アップロードした文書は全ユーザー共有（社内ナレッジベース、D-016）。
+`owner_id` は記録用のみで、閲覧・検索には影響しない。
+
+### `GET /api/documents`
+全ユーザーの文書一覧を新しい順で返す。
+
+### `POST /api/documents`
+`multipart/form-data`。`file` フィールドに PDF / Word(`.docx`) /
+テキストのみ許可（それ以外は `400`）。アップロード後、`FastAPI
+BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成を非同期
+実行する（D-016）。応答は即座に返り、`status: "pending"`。
+
+### `GET /api/documents/{id}`
+`status` は `pending → indexing → ready`、失敗時は `failed`。
+
+### `DELETE /api/documents/{id}`
+アップロードした本人または `admin` のみ（それ以外は `403`）。
+ファイル本体と `chunks` も削除する。
+
+### `POST /api/rag/query`
+```json
+{ "question": "検証機のGPUは何ですか？" }
+```
+→
+```json
+{ "answer": "GeForce GTX 1080",
+  "citations": [
+    { "document_id": 6, "filename": "spec.txt", "chunk_id": 2,
+      "content": "検証機にはGeForce GTX 1080を使用しており..." }
+  ] }
+```
+質問を埋め込み化し `chunks` をコサイン距離で検索する。十分近い
+チャンクが無い場合は LLM を呼ばず `citations: []` で
+「関連する社内文書が見つかりませんでした。」を返す。
+
+---
+
 ## 管理（`admin` ロールのみ）
 
 ### `GET /api/admin/health`
