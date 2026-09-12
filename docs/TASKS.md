@@ -188,9 +188,48 @@ c.chat.completions.create(model="chat-standard",
 
 ## Phase 2 — 社内文書検索（RAG）
 
-- [ ] ファイルアップロードと抽出（PDF / Word / テキスト）
-- [ ] チャンク分割と埋め込み生成（バックグラウンドジョブ）
-- [ ] pgvector による検索と引用つき回答
+方針（ユーザー確認済み、D-016）:
+- バックグラウンドジョブは Redis/Celery を使わず `FastAPI BackgroundTasks` で実装する
+- アップロードした文書は全ユーザー共有（社内ナレッジベース。`owner_id` はアップロード者の記録用）
+- 回答は新規専用エンドポイント `POST /api/rag/query` で提供する（`/api/v1` のOpenAI互換契約は変更しない）
+
+---
+
+### T-15 文書アップロードAPI
+- [ ] `POST /api/documents`（multipart、PDF/Word(.docx)/テキストのみ許可）
+- [ ] ファイル本体は named volume に保存し、`documents.storage_path` に記録
+- [ ] `GET /api/documents`（全ユーザー共有、一覧）
+- [ ] `DELETE /api/documents/{id}`（ファイル本体・chunksも削除）
+
+**完了条件**
+PDF・Word・テキストファイルをそれぞれアップロードでき、`documents` テーブルに
+`status='pending'` で記録される。別ユーザーでログインしても一覧に表示される。
+
+---
+
+### T-16 チャンク分割・埋め込み生成（バックグラウンドジョブ）
+- [ ] アップロード後、`BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成を実行
+- [ ] 抽出: PDF(pypdf) / Word(python-docx) / テキスト(そのまま)
+- [ ] チャンク分割: 固定長+オーバーラップ
+- [ ] 埋め込み: `ollama-embed`(bge-m3, 1024次元)で `chunks` に保存
+- [ ] `documents.status` を `pending→indexing→ready` / 失敗時 `failed` に更新
+
+**完了条件**
+アップロード後しばらく待つと `GET /api/documents/{id}` の `status` が `ready` になり、
+`chunks` に埋め込み付きの行が複数作成される。壊れたファイルは `failed` になり、
+アプリ全体は落ちない。
+
+---
+
+### T-17 RAG検索API
+- [ ] `POST /api/rag/query` `{"question": "..."}`
+- [ ] 質問を埋め込み化 → pgvectorのコサイン類似度で `chunks` を検索 → 上位N件を
+      コンテキストにチャット推論 → 引用（`document_id`・ファイル名・該当チャンク）
+      付きで回答を返す
+
+**完了条件**
+アップロード済み文書の内容について質問すると、その文書を引用した回答が返る。
+関係ない質問には、その旨（該当文書なし）を返す。
 
 ## Phase 3 — 本番機対応
 
