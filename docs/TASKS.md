@@ -175,11 +175,11 @@ c.chat.completions.create(model="chat-standard",
 ---
 
 ### T-14 console 静的UI
-- [ ] `caddy/console/` に HTML/CSS/Vanilla JS を配置
-- [ ] `caddy/Caddyfile` に静的配信を追加（`/*` → `file_server`）
-- [ ] ログイン画面
-- [ ] 会話一覧・新規作成・切り替え
-- [ ] チャット画面（モデル選択、システムプロンプト編集、
+- [x] `caddy/console/` に HTML/CSS/Vanilla JS を配置
+- [x] `caddy/Caddyfile` に静的配信を追加（`/*` → `file_server`）
+- [x] ログイン画面
+- [x] 会話一覧・新規作成・切り替え
+- [x] チャット画面（モデル選択、システムプロンプト編集、
       temperature/top_p/max_tokens調整、ストリーミング表示）
 
 **完了条件**

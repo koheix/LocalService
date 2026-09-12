@@ -38,7 +38,7 @@ logger = structlog.get_logger()
 
 class ConversationCreateRequest(BaseModel):
     title: str = ""
-    model_id: int | None = None
+    model: str | None = None  # served_name。内部IDはクライアントに見せない(D-003)
     system_prompt: str = ""
     temperature: float = 0.7
     top_p: float = 1.0
@@ -47,7 +47,7 @@ class ConversationCreateRequest(BaseModel):
 
 class ConversationUpdateRequest(BaseModel):
     title: str | None = None
-    model_id: int | None = None
+    model: str | None = None
     system_prompt: str | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -57,7 +57,7 @@ class ConversationUpdateRequest(BaseModel):
 class ConversationOut(BaseModel):
     id: int
     title: str
-    model_id: int | None
+    model: str | None
     system_prompt: str
     temperature: float
     top_p: float
@@ -73,11 +73,11 @@ class MessageOut(BaseModel):
     created_at: datetime
 
 
-def _conversation_out(c: Conversation) -> ConversationOut:
+def _conversation_out(c: Conversation, served_name: str | None) -> ConversationOut:
     return ConversationOut(
         id=c.id,
         title=c.title,
-        model_id=c.model_id,
+        model=served_name,
         system_prompt=c.system_prompt,
         temperature=c.temperature,
         top_p=c.top_p,
@@ -96,11 +96,24 @@ async def _get_owned_conversation(
     return conversation
 
 
-async def _check_model_exists(db: AsyncSession, model_id: int | None) -> None:
+async def _served_name_of(db: AsyncSession, model_id: int | None) -> str | None:
     if model_id is None:
-        return
-    if await db.get(Model, model_id) is None:
-        raise NotFoundError(f"モデルが見つかりません: {model_id}")
+        return None
+    model = await db.get(Model, model_id)
+    return model.served_name if model else None
+
+
+async def _resolve_model(db: AsyncSession, served_name: str | None) -> Model | None:
+    """served_name からモデル行を解決する。指定されたのに見つからなければ404。"""
+    if served_name is None:
+        return None
+    result = await db.execute(
+        select(Model).where(Model.served_name == served_name, Model.is_enabled.is_(True))
+    )
+    model = result.scalar_one_or_none()
+    if model is None:
+        raise NotFoundError(f"モデルが見つかりません: {served_name}")
+    return model
 
 
 @router.get("")
@@ -108,11 +121,12 @@ async def list_conversations(
     user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ) -> list[ConversationOut]:
     result = await db.execute(
-        select(Conversation)
+        select(Conversation, Model.served_name)
+        .outerjoin(Model, Conversation.model_id == Model.id)
         .where(Conversation.user_id == user.id)
         .order_by(Conversation.updated_at.desc())
     )
-    return [_conversation_out(c) for c in result.scalars()]
+    return [_conversation_out(c, served_name) for c, served_name in result.all()]
 
 
 @router.post("", status_code=201)
@@ -121,12 +135,12 @@ async def create_conversation(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ConversationOut:
-    await _check_model_exists(db, body.model_id)
+    model = await _resolve_model(db, body.model)
 
     conversation = Conversation(
         user_id=user.id,
         title=body.title,
-        model_id=body.model_id,
+        model_id=model.id if model else None,
         system_prompt=body.system_prompt,
         temperature=body.temperature,
         top_p=body.top_p,
@@ -135,7 +149,7 @@ async def create_conversation(
     db.add(conversation)
     await db.commit()
     await db.refresh(conversation)
-    return _conversation_out(conversation)
+    return _conversation_out(conversation, model.served_name if model else None)
 
 
 @router.get("/{conversation_id}")
@@ -145,7 +159,8 @@ async def get_conversation(
     db: AsyncSession = Depends(get_db),
 ) -> ConversationOut:
     conversation = await _get_owned_conversation(db, user, conversation_id)
-    return _conversation_out(conversation)
+    served_name = await _served_name_of(db, conversation.model_id)
+    return _conversation_out(conversation, served_name)
 
 
 @router.patch("/{conversation_id}")
@@ -157,9 +172,9 @@ async def update_conversation(
 ) -> ConversationOut:
     conversation = await _get_owned_conversation(db, user, conversation_id)
 
-    if body.model_id is not None:
-        await _check_model_exists(db, body.model_id)
-        conversation.model_id = body.model_id
+    if body.model is not None:
+        model = await _resolve_model(db, body.model)
+        conversation.model_id = model.id if model else None
     if body.title is not None:
         conversation.title = body.title
     if body.system_prompt is not None:
@@ -174,7 +189,8 @@ async def update_conversation(
 
     await db.commit()
     await db.refresh(conversation)
-    return _conversation_out(conversation)
+    served_name = await _served_name_of(db, conversation.model_id)
+    return _conversation_out(conversation, served_name)
 
 
 @router.delete("/{conversation_id}", status_code=204)

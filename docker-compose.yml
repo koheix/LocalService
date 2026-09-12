@@ -8,6 +8,7 @@ services:
       - "${PROXY_PORT:-8080}:8080"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/console:/srv/console:ro
       - caddy-data:/data
     depends_on:
       - gateway
