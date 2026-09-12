@@ -18,9 +18,9 @@ GTX 1080 を表示する。
 ---
 
 ### T-02 Compose で推論バックエンドを起動
-- [ ] `ollama`（GPU）と `ollama-embed`（CPU）が起動する
-- [ ] モデルは named volume に永続化され、`make down && make up` で再ダウンロードが起きない
-- [ ] **ホストにポートが公開されていないことを `docker compose ps` で確認**
+- [x] `ollama`（GPU）と `ollama-embed`（CPU）が起動する
+- [x] モデルは named volume に永続化され、`make down && make up` で再ダウンロードが起きない
+- [x] **ホストにポートが公開されていないことを `docker compose ps` で確認**
 
 **完了条件**
 `make pull-models` 後、コンテナ内から `curl ollama:11434/api/tags` が既定モデルを返す。
