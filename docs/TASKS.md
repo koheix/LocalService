@@ -208,11 +208,11 @@ PDF・Word・テキストファイルをそれぞれアップロードでき、`
 ---
 
 ### T-16 チャンク分割・埋め込み生成（バックグラウンドジョブ）
-- [ ] アップロード後、`BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成を実行
-- [ ] 抽出: PDF(pypdf) / Word(python-docx) / テキスト(そのまま)
-- [ ] チャンク分割: 固定長+オーバーラップ
-- [ ] 埋め込み: `ollama-embed`(bge-m3, 1024次元)で `chunks` に保存
-- [ ] `documents.status` を `pending→indexing→ready` / 失敗時 `failed` に更新
+- [x] アップロード後、`BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成を実行
+- [x] 抽出: PDF(pypdf) / Word(python-docx) / テキスト(そのまま)
+- [x] チャンク分割: 固定長+オーバーラップ
+- [x] 埋め込み: `ollama-embed`(bge-m3, 1024次元)で `chunks` に保存
+- [x] `documents.status` を `pending→indexing→ready` / 失敗時 `failed` に更新
 
 **完了条件**
 アップロード後しばらく待つと `GET /api/documents/{id}` の `status` が `ready` になり、

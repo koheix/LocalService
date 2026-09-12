@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,7 @@ from app.db import get_db
 from app.deps import current_user
 from app.errors import InvalidRequestError, NotFoundError, PermissionError_
 from app.models import Document, User
+from app.rag import index_document
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -58,6 +59,7 @@ async def list_documents(
 @router.post("", status_code=201)
 async def upload_document(
     file: UploadFile,
+    background_tasks: BackgroundTasks,
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DocumentOut:
@@ -94,6 +96,7 @@ async def upload_document(
     db.add(document)
     await db.commit()
     await db.refresh(document)
+    background_tasks.add_task(index_document, document.id)
     return _document_out(document)
 
 
