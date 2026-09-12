@@ -63,9 +63,9 @@ GTX 1080 を表示する。
 ---
 
 ### T-06 バックエンド抽象化
-- [ ] `backends/base.py` に `InferenceBackend` Protocol
-- [ ] `backends/ollama.py` 実装（chat / chat_stream / embed / list_models / health）
-- [ ] `config.LLM_BACKEND` による実装選択
+- [x] `backends/base.py` に `InferenceBackend` Protocol
+- [x] `backends/ollama.py` 実装（chat / chat_stream / embed / list_models / health）
+- [x] `config.LLM_BACKEND` による実装選択
 
 **完了条件**
 `grep -ri "ollama" gateway/app/routers/` が**何もヒットしないこと**。
