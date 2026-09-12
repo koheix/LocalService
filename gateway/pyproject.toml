@@ -32,3 +32,8 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "f
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# app.db の engine はプロセス起動時に1つだけ作られるため、テストごとに
+# イベントループが切り替わると asyncpg の接続が別ループに紐付いてしまう。
+# セッション全体で1つのループを共有する。
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
