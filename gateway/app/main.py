@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_db
 from app.errors import register_error_handlers
-from app.routers import admin, auth, conversations, v1
+from app.routers import admin, auth, conversations, documents, v1
 
 
 def _configure_logging() -> None:
@@ -40,6 +40,7 @@ def create_app() -> FastAPI:
     app.include_router(v1.router)
     app.include_router(admin.router)
     app.include_router(conversations.router)
+    app.include_router(documents.router)
 
     @app.get("/api/health")
     async def health(db: AsyncSession = Depends(get_db)) -> dict[str, str]:

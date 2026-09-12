@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     default_embed_model: str = "bge-m3"
     default_num_ctx: int = 4096
 
+    # RAG（Phase 2）
+    uploads_dir: str = "/app/uploads"
+    max_upload_size_bytes: int = 20 * 1024 * 1024
+    chunk_size_chars: int = 1000
+    chunk_overlap_chars: int = 200
+    rag_top_k: int = 4
+
 
 @lru_cache
 def get_settings() -> Settings:

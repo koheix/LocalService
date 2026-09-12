@@ -196,10 +196,10 @@ c.chat.completions.create(model="chat-standard",
 ---
 
 ### T-15 文書アップロードAPI
-- [ ] `POST /api/documents`（multipart、PDF/Word(.docx)/テキストのみ許可）
-- [ ] ファイル本体は named volume に保存し、`documents.storage_path` に記録
-- [ ] `GET /api/documents`（全ユーザー共有、一覧）
-- [ ] `DELETE /api/documents/{id}`（ファイル本体・chunksも削除）
+- [x] `POST /api/documents`（multipart、PDF/Word(.docx)/テキストのみ許可）
+- [x] ファイル本体は named volume に保存し、`documents.storage_path` に記録
+- [x] `GET /api/documents`（全ユーザー共有、一覧）
+- [x] `DELETE /api/documents/{id}`（ファイル本体・chunksも削除）
 
 **完了条件**
 PDF・Word・テキストファイルをそれぞれアップロードでき、`documents` テーブルに
