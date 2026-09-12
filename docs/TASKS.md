@@ -39,9 +39,9 @@ GTX 1080 を表示する。
 ---
 
 ### T-04 gateway の骨格
-- [ ] `config.py`（Pydantic Settings。環境変数の読み込みはここだけ）
-- [ ] `db.py`、`models.py`、`errors.py` と exception handler
-- [ ] `GET /api/health` が DB 疎通を含めて `200` を返す
+- [x] `config.py`（Pydantic Settings。環境変数の読み込みはここだけ）
+- [x] `db.py`、`models.py`、`errors.py` と exception handler
+- [x] `GET /api/health` が DB 疎通を含めて `200` を返す
 
 **完了条件**
 `make up` 後、`curl localhost:8080/api/health` が `{"status":"ok"}` を返す。
