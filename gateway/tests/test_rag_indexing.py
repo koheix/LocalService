@@ -6,7 +6,7 @@ ASYNC(ruff)対策として async テスト内では asyncio.to_thread 経由に�
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from io import BytesIO
 from pathlib import Path
 
@@ -337,3 +337,79 @@ async def test_index_document_nonexistent_id_is_noop(db: AsyncSession) -> None:
 
     result_after = await db.execute(select(Chunk))
     assert len(result_after.scalars().all()) == count_before
+
+
+async def test_index_document_picks_lowest_id_embedding_model_deterministically(
+    db: AsyncSession,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    isolate_models: Callable[[Sequence[Model]], Awaitable[None]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """index_document 側でも、有効なembeddingモデルが複数あればid最小が選ばれること。
+
+    確認済み: app/rag.py の pick_enabled_model の `.order_by(Model.id)` を
+    `.order_by(Model.id.desc())` に反転すると、本テストが失敗する
+    (routers/rag.py側の同種テストだけでは、index_document側の再導入バグ
+    ―過去に実際にこの形で指摘された―を検知できない)。
+    """
+    user = await login_as_new_user()
+    model_low = await make_model(kind="embedding", backend_name="fake-embed-low")
+    model_high = await make_model(kind="embedding", backend_name="fake-embed-high")
+    assert model_low.id < model_high.id
+    await isolate_models([model_low, model_high])
+
+    path = tmp_path / "note.txt"
+    await _write_bytes(path, b"hello")
+    document = await _make_pending_document(db, user.id, path)
+
+    fake = FakeBackend()
+    monkeypatch.setattr("app.rag.get_embed_backend", lambda: fake)
+
+    await index_document(document.id)
+
+    await db.refresh(document)
+    assert document.status == "ready"
+    assert len(fake.embed_calls) == 1
+    assert fake.embed_calls[0][1] == model_low.backend_name
+
+
+async def test_index_document_reindex_does_not_touch_other_documents_chunks(
+    db: AsyncSession,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    tmp_path: Path,
+) -> None:
+    """文書Aを再インデックスしても、文書Bのchunksは変化しないこと。
+
+    確認済み: app/rag.py の `delete(Chunk).where(Chunk.document_id == document.id)`
+    から `.where(...)` を落とす(全chunksを消してしまう)と、本テストが失敗する。
+    これまでのindex_documentのテストは全て単一文書だったため、この種の
+    「再インデックスが無関係な文書のchunksまで巻き込む」バグを検知できなかった。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    await isolate_model(embed_model)
+
+    path_a = tmp_path / "a.txt"
+    await _write_bytes(path_a, b"AAAAAAAAAA")
+    doc_a = await _make_pending_document(db, user.id, path_a)
+
+    path_b = tmp_path / "b.txt"
+    await _write_bytes(path_b, b"BBBBBBBBBB")
+    doc_b = await _make_pending_document(db, user.id, path_b)
+
+    await index_document(doc_a.id)
+    await index_document(doc_b.id)
+
+    result_b_before = await db.execute(select(Chunk).where(Chunk.document_id == doc_b.id))
+    chunks_b_before = [(c.id, c.content) for c in result_b_before.scalars().all()]
+    assert chunks_b_before  # 前提: Bにもchunkが作成されていること
+
+    await index_document(doc_a.id)  # Aだけ再インデックス
+
+    result_b_after = await db.execute(select(Chunk).where(Chunk.document_id == doc_b.id))
+    chunks_b_after = [(c.id, c.content) for c in result_b_after.scalars().all()]
+    assert chunks_b_after == chunks_b_before

@@ -455,6 +455,45 @@ async def test_rag_query_permission_denied_for_embedding_model(
     assert resp.status_code == 403
 
 
+async def test_rag_query_embed_backend_unavailable_returns_503_and_logs_error(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """埋め込みバックエンド(Ollama)停止等のBackendUnavailableErrorは、
+
+    他のAppErrorと同様にJSONエンベロープ付きの503として返り、
+    usage_logsにも記録されること(埋め込み側の異常応答は従来未検証だった)。
+    """
+    from app.errors import BackendUnavailableError
+
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    await isolate_model(embed_model)
+
+    class UnavailableEmbedBackend(FakeBackend):
+        async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+            raise BackendUnavailableError("Ollama停止中(テスト用に発生させた障害)")
+
+    monkeypatch.setattr("app.routers.rag.get_embed_backend", lambda: UnavailableEmbedBackend())
+
+    resp = await client.post("/api/rag/query", json={"question": "hi"})
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "BACKEND_UNAVAILABLE"
+
+    result = await db.execute(
+        select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 1
+    assert logs[0].status == "error"
+    assert logs[0].error_code == "BACKEND_UNAVAILABLE"
+    assert logs[0].model_id == embed_model.id
+
+
 async def test_rag_query_chat_backend_raises_and_logs_error(
     client: AsyncClient,
     login_as_new_user: Callable,
@@ -619,6 +658,15 @@ async def test_rag_query_limits_to_top_k(
     body = resp.json()
     contents = [c["content"] for c in body["citations"]]
     assert contents == ["c0", "c1", "c2", "c3"]  # 最も遠いc4(cos_sim=0.8)は含まれない
+
+    # citations に4件返るだけでなく、LLMへのプロンプトにも4件全ての内容と
+    # 出典ラベルが渡っていること(citationsとLLMへの文脈が食い違わない)。
+    assert len(fake_chat.chat_calls) == 1
+    sent_content = fake_chat.chat_calls[0]["messages"][1]["content"]
+    for i in range(4):
+        assert f"c{i}" in sent_content
+        assert f"[出典{i + 1}:" in sent_content
+    assert "c4" not in sent_content
 
 
 async def test_rag_query_via_api_key_records_api_key_id(
