@@ -290,3 +290,44 @@ Caddy は既に `file_server` を持つため、専用コンテナを増やさ�
   利用状況（レート制限・課金相当の集計）の単位として馴染まないと判断した。
   将来、埋め込み推論のコストが無視できなくなった場合は別途記録方式
   （文書単位で1行にまとめる等）を検討する。
+
+---
+
+## D-017 console（Web UI）を React ベースへ移行する（D-014を上書き）
+
+**判断**
+- D-014で決定した「ビルド不要の静的HTML/CSS/Vanilla JS、専用コンテナを
+  立てない」方針を撤回し、React 18 + TypeScript + Vite + Tailwind CSS の
+  SPAへ全面移行する。ビルド成果物は新設する `console` コンテナ（nginx
+  または Caddy）から配信し、`proxy` の Caddyfile はそこへリバースプロキシ
+  する形に変える。
+- UIライブラリ（MUI / Chakra 等）・状態管理ライブラリ（Redux等）は
+  導入しない。画面数が少なく、既定テーマの見た目が強く出て後から剥がす
+  コストの方が高いと判断した。
+- バックエンドAPI（`/api/conversations/*`、`/api/rag/*`、`/api/documents/*`
+  等）は無改修。新UIは既存のOpenAI互換契約・RAG契約をそのまま呼ぶ。
+- 新しいホーム画面（`docs/UI_HOME.md` に詳細仕様、`docs/assets/home-mockup.png`
+  にモックアップ）を追加し、AWSマネジメントコンソールのトップ相当の
+  入口画面とする。
+
+**理由** — ユーザー判断。検証機1台・同時利用1名というPhase 0/1の制約下では
+D-014のビルド不要方針が適していたが、画面数の増加（ホーム画面、
+プレイグラウンド、RAG検索、管理系複数画面）に伴い、Vanilla JSでの
+状態管理・ルーティングの保守コストがビルドツール導入コストを上回ると
+判断した。ユーザーに確認済み。
+
+**移行の進め方（ユーザー確認済み）**
+- 既に実装・レビュー済みの Phase 2（RAG、`feat/phase2-rag` ブランチ）は
+  現行の Vanilla JS console（`caddy/console/`）を含めて先に完成させ、
+  `main` にマージする。gatewayのAPI自体はフロントエンドの実装技術に
+  依存しないため、先にマージしても後のReact移行の妨げにならない。
+- React移行は `docs/TASKS.md` の Phase 3（T-19〜T-23）として、Phase 2
+  マージ後に着手する。T-23で旧Vanilla JS console（`caddy/console/`）を削除する。
+
+**影響**
+- `CLAUDE.md` の技術スタック節（console (Web UI)）を更新した。
+- `docs/TASKS.md` の旧Phase 1 T-14・旧Phase 2 T-18（Vanilla JS UI部分）は
+  実装済みのまま残し、「Phase 3で置き換え予定」と注記した。新規タスクは
+  T-19（フロントエンド土台）〜T-23（旧UI削除）としてPhase 3に追加した。
+- T-20（ホーム画面）でのみ使う `GET /api/admin/summary` の追加が、
+  React移行に伴う唯一のgateway側変更として残っている。

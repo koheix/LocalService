@@ -55,9 +55,12 @@ AWSマネジメントコンソールのように、複数の便利アプリを�
 - **推論**: Ollama（GPU 1台、LLM用）＋ Ollama（CPU、Embedding用）の2インスタンス
 - **リバースプロキシ**: Caddy
 - **実行基盤**: Docker Compose / NVIDIA Container Toolkit
-- **console (Web UI)**: Phase 1（プレイグラウンド）から着手。ビルド不要の
-  静的 HTML/CSS/Vanilla JS とし、`proxy`（Caddy）が `caddy/console/` を
-  直接配信する（専用コンテナは立てない）。詳細は D-014 を参照。
+- **console (Web UI)**: React 18 + TypeScript + Vite + Tailwind CSS の SPA。
+  ビルド成果物を `console` コンテナ（nginx または Caddy）から配信し、
+  `proxy`（Caddy）がそこへリバースプロキシする。UIライブラリ（MUI/Chakra等）・
+  状態管理ライブラリは導入しない。Phase 1 では専用コンテナを立てない
+  ビルド不要の Vanilla JS 静的サイトとして着手したが（D-014）、
+  Phase 3 で React ベースへ移行した（D-017、D-014 を上書き）。
 
 ---
 

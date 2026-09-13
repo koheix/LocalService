@@ -132,7 +132,10 @@ c.chat.completions.create(model="chat-standard",
 ## Phase 1 — プレイグラウンド
 
 方針は D-014 で決定済み（Web UI をPhase 1で作る、ビルド不要の静的サイト、
-専用コンテナは立てず Caddy が配信）。以下のタスクに分解して進める。
+専用コンテナは立てず Caddy が配信）。**この方針は D-017 で React ベースに
+更新された。** 以下の T-11〜T-14 は初期実装として完了済みだが、UI部分
+（T-14）は Phase 3（React 移行）で置き換える。バックエンドAPI
+（T-11〜T-13）はそのまま新UIからも利用する。
 
 ---
 
@@ -174,7 +177,7 @@ c.chat.completions.create(model="chat-standard",
 
 ---
 
-### T-14 console 静的UI
+### T-14 console 静的UI（初期実装、Phase 3 で React 版に置き換え予定）
 - [x] `caddy/console/` に HTML/CSS/Vanilla JS を配置
 - [x] `caddy/Caddyfile` に静的配信を追加（`/*` → `file_server`）
 - [x] ログイン画面
@@ -233,7 +236,7 @@ PDF・Word・テキストファイルをそれぞれアップロードでき、`
 
 ---
 
-### T-18 console にRAG画面を追加
+### T-18 console にRAG画面を追加（初期実装、Phase 3 で React 版に置き換え予定）
 - [x] タブ切替（チャット／文書検索）
 - [x] 文書アップロード・一覧（状態表示、所有者またはadminのみ削除ボタン）
 - [x] 質問フォームと引用付き回答表示
@@ -242,7 +245,79 @@ PDF・Word・テキストファイルをそれぞれアップロードでき、`
 ブラウザで文書検索タブに切替え、アップロード→インデックス完了(準備完了表示)
 待ち→質問→引用付き回答の表示までを一連の操作で確認できる。
 
-## Phase 3 — 本番機対応
+## Phase 3 — Web UI を React へ移行
+
+方針（ユーザー確認済み、D-017。D-014を上書きする）:
+- console を Vanilla JS 静的サイトから React 18 + TypeScript + Vite + Tailwind の
+  SPA に全面移行する。ビルド成果物は `console` コンテナ（nginx または Caddy）
+  から配信し、`proxy` の Caddyfile はそこへリバースプロキシする
+- バックエンドAPI（T-11〜T-13、T-15〜T-17）は無改修で新UIから利用する。
+  gateway 側の変更は T-20 の `GET /api/admin/summary` 追加のみ
+- UIライブラリ（MUI / Chakra 等）は導入しない。状態管理ライブラリも入れない
+
+---
+
+### T-19 フロントエンドの土台
+- [ ] `console/` に React 18 + TypeScript + Vite + Tailwind をセットアップ
+- [ ] Dockerfile（ビルド成果物を nginx または Caddy で配信）
+- [ ] `caddy/Caddyfile` の `handle {}` を console へのリバースプロキシに変更
+- [ ] ログイン画面、認証状態の保持、`401` でのリダイレクト
+
+**完了条件**
+`http://localhost:8080/` でログイン画面が出て、シードした管理者でログインでき、
+リロードしてもセッションが維持される。
+
+---
+
+### T-20 ホーム画面
+- [ ] `docs/UI_HOME.md` の仕様どおりに実装する
+- [ ] `GET /api/admin/summary` を gateway に追加（件数を1回で返す）
+- [ ] システム状態パネルの30秒ポーリング
+- [ ] `user` ロールで管理セクションが表示されないことを確認
+
+**完了条件**
+- `docs/assets/home-mockup.png` と見比べて構成が一致している
+- gateway を停止した状態でも画面が描画され、状態パネルだけが赤いドットと `—` になる
+- ブラウザを dark mode にしても全テキストが読める
+- `user` ロールでログインすると管理セクションが DOM に存在しない
+
+---
+
+### T-21 プレイグラウンド（React版）
+- [ ] モデル選択つきチャット UI（ストリーミング表示）
+- [ ] システムプロンプト保存
+- [ ] パラメータ調整（temperature / top_p / max_tokens）
+- [ ] 会話履歴の保存
+
+**着手前にユーザーと画面仕様を確認すること。**
+
+**完了条件**
+Vanilla JS版（T-14）と同等の操作（ログイン→モデル選択→システムプロンプト設定→
+チャット→履歴が残る）がReact版で一連の操作として確認できる。
+
+---
+
+### T-22 文書検索画面（React版）
+- [ ] `docs/UI_HOME.md` のアプリカードから遷移する文書検索画面をReactで実装する
+- [ ] 文書アップロード・一覧（状態表示、所有者またはadminのみ削除ボタン）
+- [ ] 質問フォームと引用付き回答表示
+
+**着手前にユーザーと画面仕様を確認すること。**
+
+**完了条件**
+Vanilla JS版（T-18）と同等の操作がReact版で一連の操作として確認できる。
+
+---
+
+### T-23 旧 Vanilla JS console の削除
+- [ ] `caddy/console/` を削除し、`caddy/Caddyfile` の静的配信設定を除去する
+- [ ] `docs/TASKS.md` の T-14 / T-18 に置き換え完了の注記を追加する
+
+**完了条件**
+React版で T-14・T-18 相当の操作がすべて確認できたうえで、Vanilla JS版が
+リポジトリから削除されている。
+
+## Phase 4 — 本番機対応
 
 - [ ] `backends/vllm.py` の実装と切り替え確認
 - [ ] Prometheus / Grafana / dcgm-exporter
