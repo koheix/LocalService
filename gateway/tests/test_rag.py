@@ -17,6 +17,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import Chunk, Document, Model, UsageLog
 from tests.conftest import FakeBackend
 
@@ -534,9 +535,12 @@ async def test_rag_query_chat_backend_empty_choices_raises_and_logs_error(
 
 
 def _vec_cos(cos_sim: float, *, dim: int = 1024) -> list[float]:
-    """クエリベクトル _vec(1.0)(=e0)に対してコサイン類似度がちょうどcos_simになる
+    """クエリベクトル _vec(1.0)(=e0)に対してコサイン類似度がおよそcos_simになる
 
-    単位ベクトルを作る(コサイン距離は1-cos_sim)。"""
+    単位ベクトルを作る(コサイン距離はおよそ1-cos_sim)。chunks.embeddingは
+    float4格納なので、厳密な等値比較が必要な境界値検証には使わないこと
+    (下記test_rag_query_distance_threshold_boundary_is_inclusiveのコメント参照)。
+    """
     v = [0.0] * dim
     v[0] = cos_sim
     v[1] = (max(0.0, 1.0 - cos_sim * cos_sim)) ** 0.5
@@ -551,10 +555,17 @@ async def test_rag_query_distance_threshold_boundary_is_inclusive(
     isolate_model: Callable[[Model], Awaitable[None]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """距離ちょうど0.6(閾値)は含み、0.61(閾値超)は除外されることを検証する。
+    """距離ちょうど閾値は含み、閾値を超えるものは除外されることを検証する。
 
-    確認済みの意図: routers/rag.py の `distance <= settings.rag_distance_threshold`
-    を `<` に変えると、境界の0.6が誤って除外され本テストが失敗する。
+    `settings.rag_distance_threshold` を0.0に固定し、クエリと完全に同一の
+    ベクトル(コサイン距離は厳密に0.0。1.0と0.0はfloat32で誤差なく表現できる
+    ので丸め誤差の影響を受けない)を「境界ちょうど」として使う。cos_simを
+    0.4/0.6等の中途半端な値にすると、chunks.embeddingがfloat4格納のため
+    丸め誤差で厳密に閾値と一致せず、`<=`を`<`に変えても検知できない
+    (実際にこの問題が過去のバージョンにあった)。
+
+    確認済み: routers/rag.py の `distance <= settings.rag_distance_threshold`
+    を `<` に変えると、境界の"boundary-in"が誤って除外され本テストが失敗する。
     """
     user = await login_as_new_user()
     embed_model = await make_model(kind="embedding")
@@ -562,11 +573,10 @@ async def test_rag_query_distance_threshold_boundary_is_inclusive(
     await isolate_model(embed_model)
     await isolate_model(chat_model)
 
-    # cos_sim=0.4 -> distance=0.6(境界, 含む) / cos_sim=0.39 -> distance=0.61(境界超, 除外)
-    await _add_chunk(db, user.id, _vec_cos(1.0), content="near")  # distance 0.0
-    await _add_chunk(db, user.id, _vec_cos(0.7), content="mid")  # distance 0.3
-    await _add_chunk(db, user.id, _vec_cos(0.4), content="boundary-in")  # distance 0.6
-    await _add_chunk(db, user.id, _vec_cos(0.39), content="boundary-out")  # distance 0.61
+    monkeypatch.setattr(get_settings(), "rag_distance_threshold", 0.0)
+
+    await _add_chunk(db, user.id, _vec(1.0), content="boundary-in")  # クエリと同一 -> distance 0.0
+    await _add_chunk(db, user.id, _vec(1.0, index=1), content="far")  # 直交 -> distance 1.0
 
     fake_embed = ControlledEmbedBackend(_vec(1.0))
     fake_chat = FakeBackend()
@@ -577,8 +587,7 @@ async def test_rag_query_distance_threshold_boundary_is_inclusive(
     assert resp.status_code == 200
     body = resp.json()
     contents = [c["content"] for c in body["citations"]]
-    # 距離昇順、0.6は含み0.61は除外。
-    assert contents == ["near", "mid", "boundary-in"]
+    assert contents == ["boundary-in"]
 
 
 async def test_rag_query_limits_to_top_k(
