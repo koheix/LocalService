@@ -659,14 +659,15 @@ async def test_rag_query_limits_to_top_k(
     contents = [c["content"] for c in body["citations"]]
     assert contents == ["c0", "c1", "c2", "c3"]  # 最も遠いc4(cos_sim=0.8)は含まれない
 
-    # citations に4件返るだけでなく、LLMへのプロンプトにも4件全ての内容と
-    # 出典ラベルが渡っていること(citationsとLLMへの文脈が食い違わない)。
+    # citations に4件返るだけでなく、LLMへのプロンプトにも4件全ての内容・
+    # 出典名・ラベル番号が「対応関係を保ったまま」渡っていること
+    # (citationsとLLMへの文脈が食い違わない)。部分一致だけの検証だと、
+    # 出典名を丸ごと落とす・順序を入れ替える、といった劣化を検知できない
+    # ため、完全一致で固定する。
     assert len(fake_chat.chat_calls) == 1
     sent_content = fake_chat.chat_calls[0]["messages"][1]["content"]
-    for i in range(4):
-        assert f"c{i}" in sent_content
-        assert f"[出典{i + 1}:" in sent_content
-    assert "c4" not in sent_content
+    expected_context = "\n\n".join(f"[出典{n}: pytest-rag-doc.txt]\nc{n - 1}" for n in range(1, 5))
+    assert sent_content == f"# コンテキスト\n{expected_context}\n\n# 質問\nhi"
 
 
 async def test_rag_query_via_api_key_records_api_key_id(
