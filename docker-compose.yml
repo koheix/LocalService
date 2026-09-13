@@ -25,6 +25,9 @@ services:
       EMBED_BACKEND_URL: http://ollama-embed:11434
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: utility
+      UPLOADS_DIR: /app/uploads
+    volumes:
+      - uploads-data:/app/uploads
     depends_on:
       postgres:
         condition: service_healthy
@@ -93,6 +96,7 @@ volumes:
   ollama-embed-models:
   pgdata:
   caddy-data:
+  uploads-data:
 
 networks:
   llmnet:

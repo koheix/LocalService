@@ -24,55 +24,91 @@
 </section>
 
 <section id="app-view" class="view" hidden>
-  <aside class="sidebar">
-    <div class="sidebar-header">
+  <nav class="top-nav">
+    <div class="top-nav-tabs">
+      <button class="tab-btn active" data-tab="chat">チャット</button>
+      <button class="tab-btn" data-tab="rag">文書検索</button>
+    </div>
+    <div class="top-nav-user">
       <strong id="whoami"></strong>
       <button id="logout-btn" class="link-btn">ログアウト</button>
     </div>
-    <button id="new-conversation-btn" class="primary-btn">＋ 新しい会話</button>
-    <ul id="conversation-list" class="conversation-list"></ul>
-  </aside>
+  </nav>
 
-  <main class="chat-area">
-    <div id="empty-state" class="empty-state">
-      左の「＋ 新しい会話」から始めてください。
-    </div>
+  <div id="chat-tab" class="tab-panel">
+    <aside class="sidebar">
+      <button id="new-conversation-btn" class="primary-btn">＋ 新しい会話</button>
+      <ul id="conversation-list" class="conversation-list"></ul>
+    </aside>
 
-    <div id="conversation-panel" class="conversation-panel" hidden>
-      <details class="settings" open>
-        <summary>会話設定</summary>
-        <div class="settings-grid">
-          <label>タイトル
-            <input type="text" id="setting-title" />
-          </label>
-          <label>モデル
-            <select id="setting-model"></select>
-          </label>
-          <label>system prompt
-            <textarea id="setting-system-prompt" rows="3"></textarea>
-          </label>
-          <label>temperature
-            <input type="number" id="setting-temperature" step="0.1" min="0" max="2" />
-          </label>
-          <label>top_p
-            <input type="number" id="setting-top-p" step="0.05" min="0" max="1" />
-          </label>
-          <label>max_tokens（空欄=既定）
-            <input type="number" id="setting-max-tokens" min="1" />
-          </label>
-          <button id="save-settings-btn" type="button">設定を保存</button>
-          <span id="settings-saved" class="hint" hidden>保存しました</span>
+    <main class="chat-area">
+      <div id="empty-state" class="empty-state">
+        左の「＋ 新しい会話」から始めてください。
+      </div>
+
+      <div id="conversation-panel" class="conversation-panel" hidden>
+        <details class="settings" open>
+          <summary>会話設定</summary>
+          <div class="settings-grid">
+            <label>タイトル
+              <input type="text" id="setting-title" />
+            </label>
+            <label>モデル
+              <select id="setting-model"></select>
+            </label>
+            <label>system prompt
+              <textarea id="setting-system-prompt" rows="3"></textarea>
+            </label>
+            <label>temperature
+              <input type="number" id="setting-temperature" step="0.1" min="0" max="2" />
+            </label>
+            <label>top_p
+              <input type="number" id="setting-top-p" step="0.05" min="0" max="1" />
+            </label>
+            <label>max_tokens（空欄=既定）
+              <input type="number" id="setting-max-tokens" min="1" />
+            </label>
+            <button id="save-settings-btn" type="button">設定を保存</button>
+            <span id="settings-saved" class="hint" hidden>保存しました</span>
+          </div>
+        </details>
+
+        <div id="messages" class="messages"></div>
+
+        <form id="send-form" class="send-form">
+          <textarea id="send-input" rows="2" placeholder="メッセージを入力（Shift+Enterで改行、Enterで送信）" required></textarea>
+          <button type="submit">送信</button>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <div id="rag-tab" class="tab-panel" hidden>
+    <div class="rag-layout">
+      <section class="rag-panel">
+        <h2>社内文書（全ユーザー共有）</h2>
+        <form id="upload-form" class="upload-form">
+          <input type="file" id="upload-file" accept=".pdf,.docx,.txt" required />
+          <button type="submit">アップロード</button>
+        </form>
+        <p id="upload-error" class="error" hidden></p>
+        <ul id="document-list" class="document-list"></ul>
+      </section>
+
+      <section class="rag-panel">
+        <h2>文書について質問する</h2>
+        <form id="rag-form" class="rag-form">
+          <textarea id="rag-question" rows="2" placeholder="例: 検証機のGPUは何ですか？" required></textarea>
+          <button type="submit">質問する</button>
+        </form>
+        <div id="rag-answer" class="rag-answer" hidden>
+          <h3>回答</h3>
+          <p id="rag-answer-text"></p>
+          <div id="rag-citations" class="rag-citations"></div>
         </div>
-      </details>
-
-      <div id="messages" class="messages"></div>
-
-      <form id="send-form" class="send-form">
-        <textarea id="send-input" rows="2" placeholder="メッセージを入力（Shift+Enterで改行、Enterで送信）" required></textarea>
-        <button type="submit">送信</button>
-      </form>
+      </section>
     </div>
-  </main>
+  </div>
 </section>
 
 <script src="app.js"></script>

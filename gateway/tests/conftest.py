@@ -9,13 +9,15 @@ Ollama が実際に起動している必要はない。
 付け、セッション終了時にまとめて削除する。
 """
 
+import asyncio
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import hash_password
@@ -23,7 +25,7 @@ from app.backends.base import BackendHealth, InferenceBackend
 from app.db import async_session_maker
 from app.limits import concurrency_slots, rate_limiter
 from app.main import app
-from app.models import Model, ModelPermission, Quota, User
+from app.models import Document, Model, ModelPermission, Quota, User
 
 
 class FakeBackend:
@@ -87,16 +89,24 @@ def fake_backend(monkeypatch: pytest.MonkeyPatch) -> FakeBackend:
     fake = FakeBackend()
     assert isinstance(fake, InferenceBackend)
 
-    for mod in ("app.routers.v1", "app.routers.conversations", "app.routers.admin"):
+    chat_backend_mods = (
+        "app.routers.v1",
+        "app.routers.conversations",
+        "app.routers.admin",
+        "app.routers.rag",
+    )
+    for mod in chat_backend_mods:
         monkeypatch.setattr(f"{mod}.get_chat_backend", lambda: fake)
-    for mod in ("app.routers.v1", "app.routers.admin"):
+    for mod in ("app.routers.v1", "app.routers.admin", "app.routers.rag", "app.rag"):
         monkeypatch.setattr(f"{mod}.get_embed_backend", lambda: fake)
 
     # パッチが実際に効いていることをここで確認する。将来 import の形が
     # 変わってパッチが効かなくなった場合、テストが実Ollamaに到達して
     # タイムアウトする前にここで気づけるようにする。
+    import app.rag as rag_mod
     import app.routers.admin as admin_mod
     import app.routers.conversations as conv_mod
+    import app.routers.rag as rag_router_mod
     import app.routers.v1 as v1_mod
 
     assert v1_mod.get_chat_backend() is fake
@@ -104,6 +114,9 @@ def fake_backend(monkeypatch: pytest.MonkeyPatch) -> FakeBackend:
     assert conv_mod.get_chat_backend() is fake
     assert admin_mod.get_chat_backend() is fake
     assert admin_mod.get_embed_backend() is fake
+    assert rag_router_mod.get_chat_backend() is fake
+    assert rag_router_mod.get_embed_backend() is fake
+    assert rag_mod.get_embed_backend() is fake
 
     return fake
 
@@ -175,11 +188,15 @@ async def login_as_new_user(
 async def make_model(
     db: AsyncSession, unique: Callable[[str], str]
 ) -> Callable[..., Awaitable[Model]]:
-    async def _make(kind: str = "chat", roles: tuple[str, ...] = ("admin", "user")) -> Model:
+    async def _make(
+        kind: str = "chat",
+        roles: tuple[str, ...] = ("admin", "user"),
+        backend_name: str = "fake-backend-model",
+    ) -> Model:
         model = Model(
             served_name=unique("model"),
             backend="ollama" if kind == "chat" else "ollama-embed",
-            backend_name="fake-backend-model",
+            backend_name=backend_name,
             kind=kind,
         )
         db.add(model)
@@ -204,10 +221,82 @@ async def make_quota(db: AsyncSession) -> Callable[..., Awaitable[Quota]]:
     return _make
 
 
+@pytest_asyncio.fixture
+async def isolate_models(
+    db: AsyncSession,
+) -> AsyncIterator[Callable[[Sequence[Model]], Awaitable[None]]]:
+    """指定したモデル以外の同kindモデルを一時的に無効化し、テスト終了時に元へ戻す。
+
+    `app.rag.pick_enabled_model` はid昇順で最初の有効なモデルを選ぶため、
+    共有DBにseed(chat-standard/embed-standard)や他テストが作った同kindの
+    モデルが残っていると、テスト対象のモデルが選ばれず結果が不定になる。
+    """
+    disabled_ids: list[int] = []
+
+    async def _do(models: Sequence[Model]) -> None:
+        keep_ids = {m.id for m in models}
+        for kind in {m.kind for m in models}:
+            result = await db.execute(
+                select(Model.id).where(
+                    Model.kind == kind,
+                    Model.id.notin_(keep_ids),
+                    Model.is_enabled.is_(True),
+                )
+            )
+            ids = [row[0] for row in result.all()]
+            if ids:
+                await db.execute(update(Model).where(Model.id.in_(ids)).values(is_enabled=False))
+                await db.commit()
+                disabled_ids.extend(ids)
+
+    yield _do
+
+    if disabled_ids:
+        await db.execute(update(Model).where(Model.id.in_(disabled_ids)).values(is_enabled=True))
+        await db.commit()
+
+
+@pytest_asyncio.fixture
+async def isolate_model(
+    isolate_models: Callable[[Sequence[Model]], Awaitable[None]],
+) -> Callable[[Model], Awaitable[None]]:
+    async def _do(model: Model) -> None:
+        await isolate_models([model])
+
+    return _do
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _cleanup_documents_after_test() -> AsyncIterator[None]:
+    """テストが作った Document/Chunk を毎テスト後に消す(共有DBの chunks に
+
+    残ると、RAGのコサイン距離検索が他テストの投入したベクトルまで拾って
+    フレークする)。Chunk は documents への ondelete=CASCADE で連動削除される。
+    ファイル名を "pytest-" プレフィックスで揃えている前提。アップロード先
+    ボリューム上の実ファイルも合わせて消し、検証機のディスクにゴミを
+    残さない。
+    """
+    yield
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(Document.storage_path).where(Document.filename.like("pytest-%"))
+        )
+        storage_paths = [row[0] for row in result.all()]
+        await session.execute(delete(Document).where(Document.filename.like("pytest-%")))
+        await session.commit()
+
+    def _unlink_all() -> None:
+        for storage_path in storage_paths:
+            Path(storage_path).unlink(missing_ok=True)
+
+    await asyncio.to_thread(_unlink_all)
+
+
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _cleanup_test_data() -> AsyncIterator[None]:
     yield
     async with async_session_maker() as session:
+        await session.execute(delete(Document).where(Document.filename.like("pytest-%")))
         await session.execute(delete(User).where(User.email.like("pytest-%")))
         await session.execute(delete(Model).where(Model.served_name.like("pytest-%")))
         await session.commit()

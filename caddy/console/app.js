@@ -25,12 +25,17 @@ const settingsSaved = document.getElementById("settings-saved");
 
 let currentConversationId = null;
 let conversations = [];
+let currentUserId = null;
+let currentUserRole = null;
+let documents = [];
+let documentPollTimer = null;
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-  });
+  const isFormData = options.body instanceof FormData;
+  const headers = isFormData
+    ? { ...(options.headers || {}) }
+    : { "Content-Type": "application/json", ...(options.headers || {}) };
+  const res = await fetch(path, { ...options, headers });
   if (!res.ok) {
     let message = `HTTP ${res.status}`;
     try {
@@ -59,8 +64,10 @@ async function checkAuthAndInit() {
   try {
     const me = await api("/api/auth/me");
     whoami.textContent = me.email;
+    currentUserId = me.id;
+    currentUserRole = me.role;
     showApp();
-    await Promise.all([loadModels(), loadConversations()]);
+    await Promise.all([loadModels(), loadConversations(), loadDocuments()]);
   } catch {
     showLogin();
   }
@@ -84,6 +91,7 @@ loginForm.addEventListener("submit", async (e) => {
 logoutBtn.addEventListener("click", async () => {
   await api("/api/auth/logout", { method: "POST" }).catch(() => {});
   currentConversationId = null;
+  stopDocumentPolling();
   showLogin();
 });
 
@@ -257,6 +265,156 @@ sendInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendForm.requestSubmit();
+  }
+});
+
+/* ---- タブ切替 ---- */
+const tabButtons = document.querySelectorAll(".tab-btn");
+const tabPanels = {
+  chat: document.getElementById("chat-tab"),
+  rag: document.getElementById("rag-tab"),
+};
+
+for (const btn of tabButtons) {
+  btn.addEventListener("click", () => {
+    const tab = btn.dataset.tab;
+    for (const b of tabButtons) b.classList.toggle("active", b === btn);
+    for (const [name, panel] of Object.entries(tabPanels)) {
+      panel.hidden = name !== tab;
+    }
+    if (tab === "rag") {
+      loadDocuments();
+    }
+  });
+}
+
+/* ---- 文書アップロード・一覧 ---- */
+const uploadForm = document.getElementById("upload-form");
+const uploadFileInput = document.getElementById("upload-file");
+const uploadError = document.getElementById("upload-error");
+const documentListEl = document.getElementById("document-list");
+
+const STATUS_LABEL = {
+  pending: "待機中",
+  indexing: "解析中",
+  ready: "準備完了",
+  failed: "失敗",
+};
+
+async function loadDocuments() {
+  documents = await api("/api/documents");
+  renderDocumentList();
+  const hasInFlight = documents.some((d) => d.status === "pending" || d.status === "indexing");
+  if (hasInFlight) {
+    startDocumentPolling();
+  } else {
+    stopDocumentPolling();
+  }
+}
+
+function startDocumentPolling() {
+  if (documentPollTimer) return;
+  documentPollTimer = setInterval(loadDocuments, 3000);
+}
+
+function stopDocumentPolling() {
+  if (!documentPollTimer) return;
+  clearInterval(documentPollTimer);
+  documentPollTimer = null;
+}
+
+function renderDocumentList() {
+  documentListEl.innerHTML = "";
+  for (const d of documents) {
+    const li = document.createElement("li");
+
+    const name = document.createElement("span");
+    name.className = "doc-name";
+    name.textContent = d.filename;
+    li.appendChild(name);
+
+    const status = document.createElement("span");
+    status.className = `doc-status ${d.status}`;
+    status.textContent = STATUS_LABEL[d.status] || d.status;
+    li.appendChild(status);
+
+    if (d.owner_id === currentUserId || currentUserRole === "admin") {
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "doc-delete-btn";
+      delBtn.textContent = "削除";
+      delBtn.addEventListener("click", () => deleteDocument(d.id));
+      li.appendChild(delBtn);
+    }
+
+    documentListEl.appendChild(li);
+  }
+}
+
+async function deleteDocument(id) {
+  await api(`/api/documents/${id}`, { method: "DELETE" });
+  await loadDocuments();
+}
+
+uploadForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  uploadError.hidden = true;
+  const file = uploadFileInput.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    await api("/api/documents", { method: "POST", body: formData });
+    uploadForm.reset();
+    await loadDocuments();
+  } catch (err) {
+    uploadError.textContent = err.message;
+    uploadError.hidden = false;
+  }
+});
+
+/* ---- RAG質問 ---- */
+const ragForm = document.getElementById("rag-form");
+const ragQuestionInput = document.getElementById("rag-question");
+const ragAnswerEl = document.getElementById("rag-answer");
+const ragAnswerText = document.getElementById("rag-answer-text");
+const ragCitationsEl = document.getElementById("rag-citations");
+
+ragForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const question = ragQuestionInput.value.trim();
+  if (!question) return;
+
+  const submitBtn = ragForm.querySelector("button[type=submit]");
+  submitBtn.disabled = true;
+  ragAnswerEl.hidden = false;
+  ragAnswerText.textContent = "考え中...";
+  ragCitationsEl.innerHTML = "";
+
+  try {
+    const res = await api("/api/rag/query", {
+      method: "POST",
+      body: JSON.stringify({ question }),
+    });
+    ragAnswerText.textContent = res.answer;
+    for (const c of res.citations) {
+      const div = document.createElement("div");
+      div.className = "citation";
+      const source = document.createElement("div");
+      source.className = "citation-source";
+      source.textContent = `出典: ${c.filename}`;
+      const content = document.createElement("div");
+      content.textContent = c.content;
+      div.appendChild(source);
+      div.appendChild(content);
+      ragCitationsEl.appendChild(div);
+    }
+  } catch (err) {
+    ragAnswerText.textContent = `[エラー] ${err.message}`;
+  } finally {
+    submitBtn.disabled = false;
   }
 });
 
