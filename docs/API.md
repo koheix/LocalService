@@ -21,7 +21,7 @@
 
 ### `GET /api/auth/me`
 ```json
-{ "id": 1, "email": "...", "role": "user", "created_at": "..." }
+{ "id": 1, "email": "...", "display_name": "...", "role": "user", "created_at": "..." }
 ```
 
 ### `POST /api/auth/api-keys`

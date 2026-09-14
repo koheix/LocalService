@@ -42,12 +42,13 @@ async def test_admin_endpoints_require_admin_role(
 async def test_all_admin_mutation_and_list_endpoints_require_admin_role(
     client: AsyncClient, login_as_new_user: Callable
 ) -> None:
-    """/health, /gpu 以外の /api/admin/* を全て網羅的に403確認する。
+    """/health, /gpu 以外の /api/admin/* を全て網羅的に403確認する(HTTPレベル)。
 
-    router定義からdependencies=[Depends(require_admin)]を一括で外し、
-    各エンドポイントに個別指定する形に変えた(T-20)ため、新しいエンドポイントを
-    追加した際にこの指定を書き忘れても検知できるよう、ここに追加すること。
-    (health/gpu は意図的な例外なので別テストで確認済み)
+    実際にリクエストを送り、403とエラーボディの形まで確認する。ただし
+    このURL一覧は手動で維持しているため、新しいエンドポイントを追加して
+    ここへの追記を忘れると検知できない(health/gpuは意図的な例外)。
+    その「追記忘れ」自体を機械的に検知するのは
+    test_all_admin_routes_declare_require_admin_dependency の役目。
     パスパラメータは実在しないID(999999999)を渡す。require_adminは
     エンドポイント本体(NotFoundError等)より先に評価されるため、
     admin以外なら404ではなく403になるはずである。
@@ -74,6 +75,55 @@ async def test_all_admin_mutation_and_list_endpoints_require_admin_role(
         resp = await client.request(method, url, json=json_body)
         assert resp.status_code == 403, f"{method} {url} was {resp.status_code}, expected 403"
         assert resp.json()["error"]["code"] == "FORBIDDEN"
+
+
+def _all_api_routes(routes: list) -> list:
+    """FastAPIのapp.routesを再帰的に展開する。
+
+    include_router()されたルートは`_IncludedRouter`(内部でoriginal_router
+    属性に元のAPIRouterを保持する)でラップされ、app.routesを1階層見ただけ
+    ではAPIRouteが取れないため、original_router.routesへ再帰する。
+    """
+    result: list = []
+    for route in routes:
+        if hasattr(route, "original_router"):
+            result.extend(_all_api_routes(route.original_router.routes))
+        elif hasattr(route, "path"):
+            result.append(route)
+    return result
+
+
+def test_all_admin_routes_declare_require_admin_dependency() -> None:
+    """/health, /gpu 以外の /api/admin/* が、実際にrequire_adminを
+
+    dependencyとして宣言しているかをroute定義から直接検査する
+    (HTTPリクエストは送らない)。T-20でルーター一括の
+    dependencies=[Depends(require_admin)]を個別指定に変えたため、
+    新しいエンドポイントを追加した際にこの指定を書き忘れても、
+    上のtest_all_admin_mutation_and_list_endpoints_require_admin_roleの
+    ような手動維持のURL一覧への追記を待たずに、ここで機械的に検知できる。
+
+    確認済み: admin.pyの任意のエンドポイントから
+    dependencies=[Depends(require_admin)]を外すと本テストが失敗する。
+    """
+    from app.deps import require_admin
+    from app.main import app
+
+    exempt_paths = {"/api/admin/health", "/api/admin/gpu"}
+    admin_routes = [
+        route
+        for route in _all_api_routes(app.routes)
+        if route.path.startswith("/api/admin") and route.path not in exempt_paths
+    ]
+    # ルート抽出自体が壊れて0件になった場合に「全部pass」を誤検知しないための下限。
+    assert len(admin_routes) >= 10
+
+    missing = [
+        f"{sorted(route.methods)} {route.path}"
+        for route in admin_routes
+        if require_admin not in {dep.call for dep in route.dependant.dependencies}
+    ]
+    assert missing == [], f"require_adminが宣言されていないadminルート: {missing}"
 
 
 async def test_admin_health(client: AsyncClient, login_as_new_user: Callable) -> None:
