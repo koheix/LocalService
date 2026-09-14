@@ -7,8 +7,9 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import hash_password
 from app.backends.base import BackendHealth
-from app.models import UsageLog
+from app.models import UsageLog, User
 from tests.conftest import FakeBackend
 
 
@@ -47,6 +48,85 @@ async def test_admin_health(client: AsyncClient, login_as_new_user: Callable) ->
     assert body["llm"]["ok"] is True
     assert body["embed"]["ok"] is True
     assert body["db"]["ok"] is True
+
+
+async def test_admin_health_and_gpu_require_auth_401(client: AsyncClient) -> None:
+    assert (await client.get("/api/admin/health")).status_code == 401
+    assert (await client.get("/api/admin/gpu")).status_code == 401
+
+
+async def test_admin_health_and_gpu_accessible_to_user_role(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    """docs/UI_HOME.md: ホーム画面のシステム状態パネルは一般ユーザーにも表示するため、
+
+    /health と /gpu だけは admin 以外(user ロール)でも200になること。
+    確認済み: admin.py の該当2エンドポイントから dependencies=[Depends(current_user)]
+    を外す(無認証化する)と test_admin_health_and_gpu_require_auth_401 が失敗し、
+    require_admin に戻すと本テストが403で失敗する。
+    """
+    await login_as_new_user(role="user")
+    assert (await client.get("/api/admin/health")).status_code == 200
+    assert (await client.get("/api/admin/gpu")).status_code == 200
+
+
+async def test_admin_summary_requires_admin_role(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    await login_as_new_user(role="user")
+    resp = await client.get("/api/admin/summary")
+    assert resp.status_code == 403
+
+
+async def test_admin_summary_counts(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    make_quota: Callable,
+    db: AsyncSession,
+    unique: Callable[[str], str],
+) -> None:
+    admin = await login_as_new_user(role="admin")
+
+    before = await client.get("/api/admin/summary")
+    assert before.status_code == 200
+    base = before.json()
+
+    # 有効なユーザーを1件追加(is_active=Trueが既定)。
+    extra_user = User(
+        email=unique("user") + "@example.local",
+        display_name="",
+        password_hash=hash_password("testpass123"),
+        role="user",
+    )
+    db.add(extra_user)
+    # 無効化されたモデルはカウントされないことも確認するため2件作る。
+    enabled_model = await make_model(kind="chat")
+    disabled_model = await make_model(kind="chat")
+    disabled_model.is_enabled = False
+    db.add(disabled_model)
+    await db.commit()
+    await db.refresh(enabled_model)
+
+    db.add(
+        UsageLog(
+            user_id=admin.id,
+            model_id=enabled_model.id,
+            app="api",
+            prompt_tokens=100,
+            completion_tokens=23,
+            status="ok",
+        )
+    )
+    await db.commit()
+
+    after = await client.get("/api/admin/summary")
+    assert after.status_code == 200
+    got = after.json()
+
+    assert got["active_user_count"] == base["active_user_count"] + 1
+    assert got["active_model_count"] == base["active_model_count"] + 1  # 無効化した分は増えない
+    assert got["today_total_tokens"] == base["today_total_tokens"] + 123
 
 
 async def test_admin_health_reports_backend_down_without_500(

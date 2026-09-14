@@ -1,8 +1,13 @@
-"""ユーザー管理・モデル管理・利用状況(adminロールのみ)。"""
+"""ユーザー管理・モデル管理・利用状況(adminロールのみ)。
+
+ただし `/health` と `/gpu` のみ例外で、認証済みなら誰でも呼べる
+(docs/UI_HOME.md: ホーム画面のシステム状態パネルは一般ユーザーにも表示し、
+他の人が重い処理を流しているかを全員が判断できるようにするため。ユーザー確認済み)。
+"""
 
 import asyncio
 import json
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
@@ -14,11 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import hash_password
 from app.backends import get_chat_backend, get_embed_backend
 from app.db import get_db
-from app.deps import require_admin
+from app.deps import current_user, require_admin
 from app.errors import ConflictError, NotFoundError
 from app.models import Model, ModelPermission, UsageLog, User
 
-router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +31,7 @@ router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(re
 # ---------------------------------------------------------------------------
 
 
-@router.get("/health")
+@router.get("/health", dependencies=[Depends(current_user)])
 async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     llm_health = await get_chat_backend().health()
     embed_health = await get_embed_backend().health()
@@ -71,12 +76,40 @@ async def _query_gpu() -> dict[str, Any]:
         return {"available": False}
 
 
-@router.get("/gpu")
+@router.get("/gpu", dependencies=[Depends(current_user)])
 async def gpu() -> dict[str, Any]:
     return await _query_gpu()
 
 
-@router.get("/usage")
+class SummaryOut(BaseModel):
+    active_user_count: int
+    active_model_count: int
+    today_total_tokens: int
+
+
+@router.get("/summary", dependencies=[Depends(require_admin)])
+async def summary(db: AsyncSession = Depends(get_db)) -> SummaryOut:
+    """ホーム画面の管理セクション用に、件数を1回のリクエストでまとめて返す。"""
+    active_user_count = await db.scalar(
+        select(func.count()).select_from(User).where(User.is_active.is_(True))
+    )
+    active_model_count = await db.scalar(
+        select(func.count()).select_from(Model).where(Model.is_enabled.is_(True))
+    )
+    today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_tokens = await db.scalar(
+        select(
+            func.coalesce(func.sum(UsageLog.prompt_tokens + UsageLog.completion_tokens), 0)
+        ).where(UsageLog.created_at >= today_start)
+    )
+    return SummaryOut(
+        active_user_count=active_user_count or 0,
+        active_model_count=active_model_count or 0,
+        today_total_tokens=int(today_tokens or 0),
+    )
+
+
+@router.get("/usage", dependencies=[Depends(require_admin)])
 async def usage(
     date_from: datetime = Query(..., alias="from"),
     date_to: datetime = Query(..., alias="to"),
@@ -157,13 +190,13 @@ def _user_out(u: User) -> UserOut:
     )
 
 
-@router.get("/users")
+@router.get("/users", dependencies=[Depends(require_admin)])
 async def list_users(db: AsyncSession = Depends(get_db)) -> list[UserOut]:
     result = await db.execute(select(User).order_by(User.id))
     return [_user_out(u) for u in result.scalars()]
 
 
-@router.post("/users", status_code=201)
+@router.post("/users", status_code=201, dependencies=[Depends(require_admin)])
 async def create_user(body: UserCreateRequest, db: AsyncSession = Depends(get_db)) -> UserOut:
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none() is not None:
@@ -181,7 +214,7 @@ async def create_user(body: UserCreateRequest, db: AsyncSession = Depends(get_db
     return _user_out(user)
 
 
-@router.patch("/users/{user_id}")
+@router.patch("/users/{user_id}", dependencies=[Depends(require_admin)])
 async def update_user(
     user_id: int, body: UserUpdateRequest, db: AsyncSession = Depends(get_db)
 ) -> UserOut:
@@ -203,7 +236,7 @@ async def update_user(
     return _user_out(user)
 
 
-@router.delete("/users/{user_id}", status_code=204)
+@router.delete("/users/{user_id}", status_code=204, dependencies=[Depends(require_admin)])
 async def delete_user(user_id: int, db: AsyncSession = Depends(get_db)) -> None:
     user = await db.get(User, user_id)
     if user is None:
@@ -268,13 +301,13 @@ async def _model_out(db: AsyncSession, m: Model) -> ModelOut:
     )
 
 
-@router.get("/models")
+@router.get("/models", dependencies=[Depends(require_admin)])
 async def list_models(db: AsyncSession = Depends(get_db)) -> list[ModelOut]:
     result = await db.execute(select(Model).order_by(Model.id))
     return [await _model_out(db, m) for m in result.scalars()]
 
 
-@router.post("/models", status_code=201)
+@router.post("/models", status_code=201, dependencies=[Depends(require_admin)])
 async def create_model(body: ModelCreateRequest, db: AsyncSession = Depends(get_db)) -> ModelOut:
     result = await db.execute(select(Model).where(Model.served_name == body.served_name))
     if result.scalar_one_or_none() is not None:
@@ -297,7 +330,7 @@ async def create_model(body: ModelCreateRequest, db: AsyncSession = Depends(get_
     return await _model_out(db, model)
 
 
-@router.patch("/models/{model_id}")
+@router.patch("/models/{model_id}", dependencies=[Depends(require_admin)])
 async def update_model(
     model_id: int, body: ModelUpdateRequest, db: AsyncSession = Depends(get_db)
 ) -> ModelOut:
@@ -325,7 +358,7 @@ async def update_model(
     return await _model_out(db, model)
 
 
-@router.delete("/models/{model_id}", status_code=204)
+@router.delete("/models/{model_id}", status_code=204, dependencies=[Depends(require_admin)])
 async def delete_model(model_id: int, db: AsyncSession = Depends(get_db)) -> None:
     model = await db.get(Model, model_id)
     if model is None:
@@ -334,7 +367,7 @@ async def delete_model(model_id: int, db: AsyncSession = Depends(get_db)) -> Non
     await db.commit()
 
 
-@router.post("/models/{model_id}/pull")
+@router.post("/models/{model_id}/pull", dependencies=[Depends(require_admin)])
 async def pull_model(model_id: int, db: AsyncSession = Depends(get_db)) -> StreamingResponse:
     model = await db.get(Model, model_id)
     if model is None:
