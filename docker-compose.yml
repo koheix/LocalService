@@ -8,10 +8,17 @@ services:
       - "${PROXY_PORT:-8080}:8080"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./caddy/console:/srv/console:ro
       - caddy-data:/data
     depends_on:
       - gateway
+      - console
+    networks: [llmnet]
+
+  # console(Web UI)。React製SPAのビルド成果物をCaddyで配信する(D-017)。
+  # ホストにポートは公開しない。外部からは proxy 経由のみ。
+  console:
+    build: ./console
+    restart: unless-stopped
     networks: [llmnet]
 
   gateway:

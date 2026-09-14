@@ -6,18 +6,22 @@
 [ ブラウザ / 外部ツール ]
           │  HTTPS
      ┌────▼─────┐
-     │  proxy   │  Caddy — TLS終端、静的配信、/api → gateway
-     └────┬─────┘
-          │
-     ┌────▼─────────────────────────────────────────┐
-     │  gateway (FastAPI)                           │
-     │  認証 / 権限 / 同時実行制限 / 利用ログ / 変換  │
-     └──┬─────────────┬──────────────┬──────────────┘
-        │             │              │
-   ┌────▼────┐  ┌─────▼──────┐  ┌────▼─────┐
-   │ ollama  │  │ollama-embed│  │ postgres │
-   │  GPU    │  │   CPU      │  │ pgvector │
-   └─────────┘  └────────────┘  └──────────┘
+     │  proxy   │  Caddy — TLS終端、/* → console、/api → gateway
+     └──┬────┬──┘
+        │    │
+   ┌────▼──┐ │  console: React製SPA(ビルド成果物をCaddyで配信)
+   │console│ │
+   └───────┘ │
+             │
+   ┌─────────▼─────────────────────────────────┐
+   │  gateway (FastAPI)                         │
+   │  認証 / 権限 / 同時実行制限 / 利用ログ / 変換 │
+   └──┬─────────────┬──────────────┬────────────┘
+      │              │              │
+ ┌────▼────┐  ┌──────▼─────┐  ┌────▼─────┐
+ │ ollama  │  │ollama-embed│  │ postgres │
+ │  GPU    │  │   CPU      │  │ pgvector │
+ └─────────┘  └────────────┘  └──────────┘
 ```
 
 内部ネットワーク `llmnet` は Docker の bridge。ホストにポートを公開するのは `proxy` のみ。
@@ -30,8 +34,18 @@
 
 - `:8080`（開発）/ `:443`（本番）を公開
 - `/api/*` → `gateway:8000`
-- `/*` → 静的ファイル配信（`caddy/console/`。ビルド不要の HTML/CSS/JS。D-014）
+- `/*` → `console` コンテナへ reverse_proxy（React SPA のビルド成果物を
+  `console` コンテナ内の Caddy が配信。D-017。旧D-014のビルド不要静的
+  配信方式から移行した）
 - 社内CA or 自己署名証明書。Let's Encrypt は閉域のため使わない
+
+### console (React SPA)
+
+- React 18 + TypeScript + Vite + Tailwind CSS（D-017）
+- `npm run build` の成果物を、`console` コンテナ内の Caddy が配信する
+- ホストにポートは公開しない。`proxy` からの reverse_proxy 経由のみ
+- gateway とは `/api/*` を叩くだけの関係で、`/api/v1` の OpenAI 互換契約
+  や `/api/rag/*` 等の既存APIは無改修のまま利用する
 
 ### gateway (FastAPI)
 

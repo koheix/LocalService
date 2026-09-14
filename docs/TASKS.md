@@ -258,10 +258,10 @@ PDF・Word・テキストファイルをそれぞれアップロードでき、`
 ---
 
 ### T-19 フロントエンドの土台
-- [ ] `console/` に React 18 + TypeScript + Vite + Tailwind をセットアップ
-- [ ] Dockerfile（ビルド成果物を nginx または Caddy で配信）
-- [ ] `caddy/Caddyfile` の `handle {}` を console へのリバースプロキシに変更
-- [ ] ログイン画面、認証状態の保持、`401` でのリダイレクト
+- [x] `console/` に React 18 + TypeScript + Vite + Tailwind をセットアップ
+- [x] Dockerfile（ビルド成果物を nginx または Caddy で配信）
+- [x] `caddy/Caddyfile` の `handle {}` を console へのリバースプロキシに変更
+- [x] ログイン画面、認証状態の保持、`401` でのリダイレクト
 
 **完了条件**
 `http://localhost:8080/` でログイン画面が出て、シードした管理者でログインでき、
