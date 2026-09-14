@@ -159,6 +159,7 @@ BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成
 `admin` ロールのみ。
 
 ### `GET /api/admin/health`
+`admin` ロールには以下の完全な形を返す。
 ```json
 {
   "llm": { "ok": true, "url": "...", "loaded_models": ["qwen3:4b"] },
@@ -166,6 +167,9 @@ BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成
   "db": { "ok": true }
 }
 ```
+`admin` 以外（認証済みなら誰でも）には `url` / `detail`（運用情報）を除いた
+`{"llm": {"ok": ..., "loaded_models": [...]}, "embed": {"ok": ..., "loaded_models": [...]}, "db": {"ok": ...}}`
+のみ返す。
 
 ### `GET /api/admin/gpu`
 ```json

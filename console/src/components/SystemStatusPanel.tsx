@@ -49,7 +49,10 @@ export function SystemStatusPanel() {
 
   const gpuInfo = state.reachable && state.gpu?.available ? state.gpu : null;
   const loadedModels = state.reachable ? (state.health?.llm.loaded_models ?? []) : [];
-  const usagePct = gpuInfo ? Math.round((gpuInfo.memory_used_mb / gpuInfo.memory_total_mb) * 100) : 0;
+  const usagePct =
+    gpuInfo && gpuInfo.memory_total_mb > 0
+      ? Math.round((gpuInfo.memory_used_mb / gpuInfo.memory_total_mb) * 100)
+      : 0;
 
   return (
     <section className="rounded-xl bg-gray-100 p-5 dark:bg-gray-800/60">

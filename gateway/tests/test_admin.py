@@ -39,6 +39,43 @@ async def test_admin_endpoints_require_admin_role(
     assert body["error"]["code"] == "FORBIDDEN"
 
 
+async def test_all_admin_mutation_and_list_endpoints_require_admin_role(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    """/health, /gpu 以外の /api/admin/* を全て網羅的に403確認する。
+
+    router定義からdependencies=[Depends(require_admin)]を一括で外し、
+    各エンドポイントに個別指定する形に変えた(T-20)ため、新しいエンドポイントを
+    追加した際にこの指定を書き忘れても検知できるよう、ここに追加すること。
+    (health/gpu は意図的な例外なので別テストで確認済み)
+    パスパラメータは実在しないID(999999999)を渡す。require_adminは
+    エンドポイント本体(NotFoundError等)より先に評価されるため、
+    admin以外なら404ではなく403になるはずである。
+    """
+    await login_as_new_user(role="user")
+
+    checks: list[tuple[str, str, dict | None]] = [
+        ("GET", "/api/admin/summary", None),
+        ("GET", "/api/admin/usage?from=2024-01-01T00:00:00&to=2024-01-02T00:00:00", None),
+        ("POST", "/api/admin/users", {"email": "x@example.local", "password": "x"}),
+        ("PATCH", "/api/admin/users/999999999", {}),
+        ("DELETE", "/api/admin/users/999999999", None),
+        ("GET", "/api/admin/models", None),
+        (
+            "POST",
+            "/api/admin/models",
+            {"served_name": "x", "backend": "ollama", "backend_name": "x", "kind": "chat"},
+        ),
+        ("PATCH", "/api/admin/models/999999999", {}),
+        ("DELETE", "/api/admin/models/999999999", None),
+        ("POST", "/api/admin/models/999999999/pull", None),
+    ]
+    for method, url, json_body in checks:
+        resp = await client.request(method, url, json=json_body)
+        assert resp.status_code == 403, f"{method} {url} was {resp.status_code}, expected 403"
+        assert resp.json()["error"]["code"] == "FORBIDDEN"
+
+
 async def test_admin_health(client: AsyncClient, login_as_new_user: Callable) -> None:
     await login_as_new_user(role="admin")
     resp = await client.get("/api/admin/health")
@@ -68,6 +105,20 @@ async def test_admin_health_and_gpu_accessible_to_user_role(
     await login_as_new_user(role="user")
     assert (await client.get("/api/admin/health")).status_code == 200
     assert (await client.get("/api/admin/gpu")).status_code == 200
+
+
+async def test_admin_health_hides_backend_url_and_detail_from_user_role(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    """一般ユーザーにはホーム画面が使う ok/loaded_models だけを返し、
+
+    backendのurlや例外detail(運用情報)はadmin限定のままにする。
+    """
+    await login_as_new_user(role="user")
+    body = (await client.get("/api/admin/health")).json()
+    assert set(body["llm"].keys()) == {"ok", "loaded_models"}
+    assert set(body["embed"].keys()) == {"ok", "loaded_models"}
+    assert set(body["db"].keys()) == {"ok"}
 
 
 async def test_admin_summary_requires_admin_role(

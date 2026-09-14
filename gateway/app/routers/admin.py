@@ -9,6 +9,7 @@ import asyncio
 import json
 from datetime import UTC, date, datetime
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -31,8 +32,10 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 # ---------------------------------------------------------------------------
 
 
-@router.get("/health", dependencies=[Depends(current_user)])
-async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+@router.get("/health")
+async def health(
+    user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+) -> dict[str, Any]:
     llm_health = await get_chat_backend().health()
     embed_health = await get_embed_backend().health()
 
@@ -42,9 +45,17 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     except Exception:
         db_ok = False
 
+    if user.role == "admin":
+        return {
+            "llm": llm_health.model_dump(),
+            "embed": embed_health.model_dump(),
+            "db": {"ok": db_ok},
+        }
+    # 一般ユーザーにはホーム画面のシステム状態パネルが使う項目だけ返す。
+    # backendのURLや例外詳細(detail)は運用情報のためadmin限定にする。
     return {
-        "llm": llm_health.model_dump(),
-        "embed": embed_health.model_dump(),
+        "llm": {"ok": llm_health.ok, "loaded_models": llm_health.loaded_models},
+        "embed": {"ok": embed_health.ok, "loaded_models": embed_health.loaded_models},
         "db": {"ok": db_ok},
     }
 
@@ -87,6 +98,10 @@ class SummaryOut(BaseModel):
     today_total_tokens: int
 
 
+# 「当日」はJST基準(社内ツールで利用者が日本にいる前提。ユーザー確認済み)。
+_JST = ZoneInfo("Asia/Tokyo")
+
+
 @router.get("/summary", dependencies=[Depends(require_admin)])
 async def summary(db: AsyncSession = Depends(get_db)) -> SummaryOut:
     """ホーム画面の管理セクション用に、件数を1回のリクエストでまとめて返す。"""
@@ -96,7 +111,8 @@ async def summary(db: AsyncSession = Depends(get_db)) -> SummaryOut:
     active_model_count = await db.scalar(
         select(func.count()).select_from(Model).where(Model.is_enabled.is_(True))
     )
-    today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_jst = datetime.now(_JST).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = today_start_jst.astimezone(UTC)
     today_tokens = await db.scalar(
         select(
             func.coalesce(func.sum(UsageLog.prompt_tokens + UsageLog.completion_tokens), 0)

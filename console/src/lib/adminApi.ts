@@ -1,8 +1,11 @@
 import { apiFetch } from "./api";
 
+// admin以外には url/detail(運用情報)を含まない縮小版が返る(gateway側で
+// role別に出し分けている)。ここではロール共通で必ず存在するフィールドのみ
+// 必須にし、url/detailはadmin向けのオプショナル項目として扱う。
 export type HealthResponse = {
-  llm: { ok: boolean; url: string; loaded_models: string[]; detail?: string };
-  embed: { ok: boolean; url: string; loaded_models?: string[]; detail?: string };
+  llm: { ok: boolean; loaded_models: string[]; url?: string; detail?: string };
+  embed: { ok: boolean; loaded_models?: string[]; url?: string; detail?: string };
   db: { ok: boolean };
 };
 

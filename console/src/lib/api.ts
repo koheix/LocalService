@@ -55,6 +55,9 @@ export async function apiFetch<T>(
     headers.set("Content-Type", "application/json");
   }
 
+  // 注意: timeoutMsとoptions.signalを同時に指定した場合、後者は使われない
+  // (現状どの呼び出し元も両方を渡していないため実害なし)。両方が必要に
+  // なったらAbortSignal.anyでまとめること。
   const timeoutController = timeoutMs !== undefined ? new AbortController() : undefined;
   const timeoutId =
     timeoutController !== undefined

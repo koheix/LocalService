@@ -1,20 +1,20 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { RequireAdmin } from "./components/RequireAdmin";
 import { RequireAuth } from "./components/RequireAuth";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { Placeholder } from "./pages/Placeholder";
 
-function placeholderRoute(path: string, title: string, note: string) {
+function placeholderRoute(path: string, title: string, note: string, adminOnly = false) {
+  const content = adminOnly ? (
+    <RequireAdmin>
+      <Placeholder title={title} note={note} />
+    </RequireAdmin>
+  ) : (
+    <Placeholder title={title} note={note} />
+  );
   return (
-    <Route
-      key={path}
-      path={path}
-      element={
-        <RequireAuth>
-          <Placeholder title={title} note={note} />
-        </RequireAuth>
-      }
-    />
+    <Route key={path} path={path} element={<RequireAuth>{content}</RequireAuth>} />
   );
 }
 
@@ -54,16 +54,19 @@ export function App() {
         "/admin/users",
         "ユーザー管理",
         "ユーザーの一覧・作成・権限変更を行う画面です。今後実装します。",
+        true,
       )}
       {placeholderRoute(
         "/admin/models",
         "モデル管理",
         "利用可能なモデルの一覧・有効化設定を行う画面です。今後実装します。",
+        true,
       )}
       {placeholderRoute(
         "/admin/usage",
         "利用状況",
         "ユーザー・モデル別の利用状況を確認する画面です。今後実装します。",
+        true,
       )}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
