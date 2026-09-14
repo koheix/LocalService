@@ -4,6 +4,7 @@ import { apiFetch, onUnauthorized } from "../lib/api";
 export type User = {
   id: number;
   email: string;
+  display_name: string;
   role: "admin" | "user";
   created_at: string;
 };

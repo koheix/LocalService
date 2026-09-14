@@ -7,8 +7,9 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import hash_password
 from app.backends.base import BackendHealth
-from app.models import UsageLog
+from app.models import UsageLog, User
 from tests.conftest import FakeBackend
 
 
@@ -38,6 +39,93 @@ async def test_admin_endpoints_require_admin_role(
     assert body["error"]["code"] == "FORBIDDEN"
 
 
+async def test_all_admin_mutation_and_list_endpoints_require_admin_role(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    """/health, /gpu 以外の /api/admin/* を全て網羅的に403確認する(HTTPレベル)。
+
+    実際にリクエストを送り、403とエラーボディの形まで確認する。ただし
+    このURL一覧は手動で維持しているため、新しいエンドポイントを追加して
+    ここへの追記を忘れると検知できない(health/gpuは意図的な例外)。
+    その「追記忘れ」自体を機械的に検知するのは
+    test_all_admin_routes_declare_require_admin_dependency の役目。
+    パスパラメータは実在しないID(999999999)を渡す。require_adminは
+    エンドポイント本体(NotFoundError等)より先に評価されるため、
+    admin以外なら404ではなく403になるはずである。
+    """
+    await login_as_new_user(role="user")
+
+    checks: list[tuple[str, str, dict | None]] = [
+        ("GET", "/api/admin/summary", None),
+        ("GET", "/api/admin/usage?from=2024-01-01T00:00:00&to=2024-01-02T00:00:00", None),
+        ("POST", "/api/admin/users", {"email": "x@example.local", "password": "x"}),
+        ("PATCH", "/api/admin/users/999999999", {}),
+        ("DELETE", "/api/admin/users/999999999", None),
+        ("GET", "/api/admin/models", None),
+        (
+            "POST",
+            "/api/admin/models",
+            {"served_name": "x", "backend": "ollama", "backend_name": "x", "kind": "chat"},
+        ),
+        ("PATCH", "/api/admin/models/999999999", {}),
+        ("DELETE", "/api/admin/models/999999999", None),
+        ("POST", "/api/admin/models/999999999/pull", None),
+    ]
+    for method, url, json_body in checks:
+        resp = await client.request(method, url, json=json_body)
+        assert resp.status_code == 403, f"{method} {url} was {resp.status_code}, expected 403"
+        assert resp.json()["error"]["code"] == "FORBIDDEN"
+
+
+def _all_api_routes(routes: list) -> list:
+    """FastAPIのapp.routesを再帰的に展開する。
+
+    include_router()されたルートは`_IncludedRouter`(内部でoriginal_router
+    属性に元のAPIRouterを保持する)でラップされ、app.routesを1階層見ただけ
+    ではAPIRouteが取れないため、original_router.routesへ再帰する。
+    """
+    result: list = []
+    for route in routes:
+        if hasattr(route, "original_router"):
+            result.extend(_all_api_routes(route.original_router.routes))
+        elif hasattr(route, "path"):
+            result.append(route)
+    return result
+
+
+def test_all_admin_routes_declare_require_admin_dependency() -> None:
+    """/health, /gpu 以外の /api/admin/* が、実際にrequire_adminを
+
+    dependencyとして宣言しているかをroute定義から直接検査する
+    (HTTPリクエストは送らない)。T-20でルーター一括の
+    dependencies=[Depends(require_admin)]を個別指定に変えたため、
+    新しいエンドポイントを追加した際にこの指定を書き忘れても、
+    上のtest_all_admin_mutation_and_list_endpoints_require_admin_roleの
+    ような手動維持のURL一覧への追記を待たずに、ここで機械的に検知できる。
+
+    確認済み: admin.pyの任意のエンドポイントから
+    dependencies=[Depends(require_admin)]を外すと本テストが失敗する。
+    """
+    from app.deps import require_admin
+    from app.main import app
+
+    exempt_paths = {"/api/admin/health", "/api/admin/gpu"}
+    admin_routes = [
+        route
+        for route in _all_api_routes(app.routes)
+        if route.path.startswith("/api/admin") and route.path not in exempt_paths
+    ]
+    # ルート抽出自体が壊れて0件になった場合に「全部pass」を誤検知しないための下限。
+    assert len(admin_routes) >= 10
+
+    missing = [
+        f"{sorted(route.methods)} {route.path}"
+        for route in admin_routes
+        if require_admin not in {dep.call for dep in route.dependant.dependencies}
+    ]
+    assert missing == [], f"require_adminが宣言されていないadminルート: {missing}"
+
+
 async def test_admin_health(client: AsyncClient, login_as_new_user: Callable) -> None:
     await login_as_new_user(role="admin")
     resp = await client.get("/api/admin/health")
@@ -47,6 +135,99 @@ async def test_admin_health(client: AsyncClient, login_as_new_user: Callable) ->
     assert body["llm"]["ok"] is True
     assert body["embed"]["ok"] is True
     assert body["db"]["ok"] is True
+
+
+async def test_admin_health_and_gpu_require_auth_401(client: AsyncClient) -> None:
+    assert (await client.get("/api/admin/health")).status_code == 401
+    assert (await client.get("/api/admin/gpu")).status_code == 401
+
+
+async def test_admin_health_and_gpu_accessible_to_user_role(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    """docs/UI_HOME.md: ホーム画面のシステム状態パネルは一般ユーザーにも表示するため、
+
+    /health と /gpu だけは admin 以外(user ロール)でも200になること。
+    確認済み: admin.py の該当2エンドポイントから dependencies=[Depends(current_user)]
+    を外す(無認証化する)と test_admin_health_and_gpu_require_auth_401 が失敗し、
+    require_admin に戻すと本テストが403で失敗する。
+    """
+    await login_as_new_user(role="user")
+    assert (await client.get("/api/admin/health")).status_code == 200
+    assert (await client.get("/api/admin/gpu")).status_code == 200
+
+
+async def test_admin_health_hides_backend_url_and_detail_from_user_role(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    """一般ユーザーにはホーム画面が使う ok/loaded_models だけを返し、
+
+    backendのurlや例外detail(運用情報)はadmin限定のままにする。
+    """
+    await login_as_new_user(role="user")
+    body = (await client.get("/api/admin/health")).json()
+    assert set(body["llm"].keys()) == {"ok", "loaded_models"}
+    assert set(body["embed"].keys()) == {"ok", "loaded_models"}
+    assert set(body["db"].keys()) == {"ok"}
+
+
+async def test_admin_summary_requires_admin_role(
+    client: AsyncClient, login_as_new_user: Callable
+) -> None:
+    await login_as_new_user(role="user")
+    resp = await client.get("/api/admin/summary")
+    assert resp.status_code == 403
+
+
+async def test_admin_summary_counts(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    make_quota: Callable,
+    db: AsyncSession,
+    unique: Callable[[str], str],
+) -> None:
+    admin = await login_as_new_user(role="admin")
+
+    before = await client.get("/api/admin/summary")
+    assert before.status_code == 200
+    base = before.json()
+
+    # 有効なユーザーを1件追加(is_active=Trueが既定)。
+    extra_user = User(
+        email=unique("user") + "@example.local",
+        display_name="",
+        password_hash=hash_password("testpass123"),
+        role="user",
+    )
+    db.add(extra_user)
+    # 無効化されたモデルはカウントされないことも確認するため2件作る。
+    enabled_model = await make_model(kind="chat")
+    disabled_model = await make_model(kind="chat")
+    disabled_model.is_enabled = False
+    db.add(disabled_model)
+    await db.commit()
+    await db.refresh(enabled_model)
+
+    db.add(
+        UsageLog(
+            user_id=admin.id,
+            model_id=enabled_model.id,
+            app="api",
+            prompt_tokens=100,
+            completion_tokens=23,
+            status="ok",
+        )
+    )
+    await db.commit()
+
+    after = await client.get("/api/admin/summary")
+    assert after.status_code == 200
+    got = after.json()
+
+    assert got["active_user_count"] == base["active_user_count"] + 1
+    assert got["active_model_count"] == base["active_model_count"] + 1  # 無効化した分は増えない
+    assert got["today_total_tokens"] == base["today_total_tokens"] + 123
 
 
 async def test_admin_health_reports_backend_down_without_500(

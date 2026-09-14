@@ -21,7 +21,7 @@
 
 ### `GET /api/auth/me`
 ```json
-{ "id": 1, "email": "...", "role": "user", "created_at": "..." }
+{ "id": 1, "email": "...", "display_name": "...", "role": "user", "created_at": "..." }
 ```
 
 ### `POST /api/auth/api-keys`
@@ -151,9 +151,15 @@ BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成
 
 ---
 
-## 管理（`admin` ロールのみ）
+## 管理
+
+`GET /api/admin/health` と `GET /api/admin/gpu` の2つだけは例外で、
+**認証済みなら誰でも**呼べる（ホーム画面のシステム状態パネルを一般ユーザーにも
+表示するため。D-017/docs/UI_HOME.md、ユーザー確認済み）。それ以外は
+`admin` ロールのみ。
 
 ### `GET /api/admin/health`
+`admin` ロールには以下の完全な形を返す。
 ```json
 {
   "llm": { "ok": true, "url": "...", "loaded_models": ["qwen3:4b"] },
@@ -161,6 +167,9 @@ BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成
   "db": { "ok": true }
 }
 ```
+`admin` 以外（認証済みなら誰でも）には `url` / `detail`（運用情報）を除いた
+`{"llm": {"ok": ..., "loaded_models": [...]}, "embed": {"ok": ..., "loaded_models": [...]}, "db": {"ok": ...}}`
+のみ返す。
 
 ### `GET /api/admin/gpu`
 ```json
@@ -170,7 +179,14 @@ BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成
 ```
 `nvidia-smi` を叩く。コンテナから叩けない場合は `available: false` を返して落とさない。
 
-### `GET /api/admin/usage`
+### `GET /api/admin/summary`（`admin` ロールのみ）
+```json
+{ "active_user_count": 5, "active_model_count": 2, "today_total_tokens": 12345 }
+```
+ホーム画面の管理セクション（ユーザー管理・モデル管理・利用状況の各行に出す件数）を
+1回のリクエストでまとめて返す。
+
+### `GET /api/admin/usage`（`admin` ロールのみ）
 クエリ: `from`, `to`, `user_id?`, `group_by` (`user` | `model` | `day`)
 
 ### ユーザー管理
