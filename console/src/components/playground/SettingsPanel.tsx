@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ApiError } from "../../lib/api";
 import type { ModelOut } from "../../lib/conversationsApi";
 
 export type SettingsFormState = {
@@ -19,18 +20,31 @@ export function SettingsPanel({
   models: ModelOut[];
   form: SettingsFormState;
   onChange: (form: SettingsFormState) => void;
-  onSave: () => void;
+  onSave: () => Promise<void>;
 }) {
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    };
+  }, []);
 
   function set<K extends keyof SettingsFormState>(key: K, value: SettingsFormState[K]) {
     onChange({ ...form, [key]: value });
   }
 
-  function handleSave() {
-    onSave();
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1500);
+  async function handleSave() {
+    setError(null);
+    try {
+      await onSave();
+      setSaved(true);
+      savedTimerRef.current = setTimeout(() => setSaved(false), 1500);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "設定の保存に失敗しました");
+    }
   }
 
   return (
@@ -114,6 +128,7 @@ export function SettingsPanel({
             設定を保存する
           </button>
           {saved && <span className="text-xs text-gray-500 dark:text-gray-400">保存しました</span>}
+          {error && <span className="text-xs text-red-600 dark:text-red-400">{error}</span>}
         </div>
       </div>
     </details>

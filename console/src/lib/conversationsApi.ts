@@ -1,4 +1,4 @@
-import { apiFetch } from "./api";
+import { apiFetch, ApiError, notifyUnauthorized } from "./api";
 
 export type ModelOut = { id: string; object: string; owned_by: string };
 
@@ -50,10 +50,6 @@ export function updateConversation(id: number, body: ConversationUpdate): Promis
   return apiFetch(`/api/conversations/${id}`, { method: "PATCH", body });
 }
 
-export function deleteConversation(id: number): Promise<void> {
-  return apiFetch(`/api/conversations/${id}`, { method: "DELETE" });
-}
-
 export function listMessages(id: number): Promise<Message[]> {
   return apiFetch(`/api/conversations/${id}/messages`);
 }
@@ -76,14 +72,17 @@ export async function sendMessageStream(
   });
 
   if (!res.ok || !res.body) {
+    if (res.status === 401) notifyUnauthorized();
     let message = `HTTP ${res.status}`;
+    let code: string | undefined;
     try {
       const body = await res.json();
       message = body?.error?.message ?? message;
+      code = body?.error?.code;
     } catch {
       // ボディがJSONでない場合はそのまま
     }
-    throw new Error(message);
+    throw new ApiError(res.status, message, code);
   }
 
   const reader = res.body.getReader();

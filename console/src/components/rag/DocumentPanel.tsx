@@ -47,8 +47,13 @@ export function DocumentPanel({
   }
 
   async function handleDelete(id: number) {
-    await deleteDocument(id);
-    onChanged();
+    setError(null);
+    try {
+      await deleteDocument(id);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "削除に失敗しました");
+    }
   }
 
   return (

@@ -67,6 +67,7 @@ export function Playground() {
   }, []);
 
   async function selectConversation(id: number) {
+    if (sending) return;
     setCurrentId(id);
     const [conv, msgs] = await Promise.all([getConversation(id), listMessages(id)]);
     setForm(conversationToForm(conv));
@@ -78,6 +79,7 @@ export function Playground() {
   }
 
   async function handleCreate() {
+    if (sending) return;
     const defaultModel = models[0]?.id ?? null;
     const created = await createConversation("新しい会話", defaultModel);
     await refreshConversations();
@@ -143,6 +145,7 @@ export function Playground() {
           currentId={currentId}
           onSelect={selectConversation}
           onCreate={handleCreate}
+          disabled={sending}
         />
         <main className="flex min-w-0 flex-1 flex-col">
           {currentId === null ? (
