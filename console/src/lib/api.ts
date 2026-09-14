@@ -23,6 +23,16 @@ type ApiFetchOptions = Omit<RequestInit, "body"> & {
   body?: BodyInit | Record<string, unknown>;
 };
 
+type ApiFetchExtra = {
+  treatUnauthorizedAsSessionExpiry?: boolean;
+  /**
+   * ミリ秒でタイムアウトする。gatewayがハング/無応答のとき、fetchが
+   * いつまでも解決せず呼び出し元(例: システム状態パネルのポーリング)が
+   * 古いデータを表示し続けてしまうのを防ぐ。既定は無制限(タイムアウトしない)。
+   */
+  timeoutMs?: number;
+};
+
 /**
  * gateway への fetch ラッパー。
  *
@@ -34,7 +44,7 @@ type ApiFetchOptions = Omit<RequestInit, "body"> & {
 export async function apiFetch<T>(
   path: string,
   options: ApiFetchOptions = {},
-  { treatUnauthorizedAsSessionExpiry = true }: { treatUnauthorizedAsSessionExpiry?: boolean } = {},
+  { treatUnauthorizedAsSessionExpiry = true, timeoutMs }: ApiFetchExtra = {},
 ): Promise<T> {
   const isBodyPlainObject =
     options.body !== undefined &&
@@ -45,11 +55,32 @@ export async function apiFetch<T>(
     headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(path, {
-    ...options,
-    headers,
-    body: isBodyPlainObject ? JSON.stringify(options.body) : (options.body as BodyInit | undefined),
-  });
+  const timeoutController = timeoutMs !== undefined ? new AbortController() : undefined;
+  const timeoutId =
+    timeoutController !== undefined
+      ? setTimeout(() => timeoutController.abort(), timeoutMs)
+      : undefined;
+
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      // gatewayのJSONレスポンスにはCache-Controlが付いていないため、
+      // 明示的にno-storeを指定しない限りブラウザのHTTPキャッシュに
+      // 保存され得る。ポーリングで「gatewayが落ちているのに直前の
+      // 成功レスポンスが再利用され続ける」事故を防ぐため、常に無効化する
+      // (確認済み: これを外すと、gateway停止中でもSystemStatusPanelが
+      // 古いデータを表示し続けることを実機で確認した)。
+      cache: "no-store",
+      ...options,
+      headers,
+      signal: timeoutController?.signal ?? options.signal,
+      body: isBodyPlainObject
+        ? JSON.stringify(options.body)
+        : (options.body as BodyInit | undefined),
+    });
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
 
   if (res.status === 401 && treatUnauthorizedAsSessionExpiry) {
     for (const handler of unauthorizedHandlers) handler();
