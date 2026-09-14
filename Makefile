@@ -1,4 +1,4 @@
-.PHONY: setup up down logs ps pull-models migrate revision seed fmt test test-report smoke gpu clean
+.PHONY: setup up down logs ps pull-models migrate revision seed fmt test test-report smoke gpu clean lint-console
 
 DC := docker compose
 
@@ -45,6 +45,12 @@ test-report:
 
 smoke:
 	bash scripts/smoke.sh
+
+# console(React)のビルド確認とlint。consoleサービス自体はCaddyの配信専用
+# イメージ(node_modulesを含まない)なので、node:20-alpineで直接実行する。
+lint-console:
+	docker run --rm -u "$$(id -u):$$(id -g)" -v "$$PWD/console":/work -w /work -e HOME=/tmp \
+		node:20-alpine sh -c "npm ci && npm run build && npm run lint"
 
 gpu:
 	nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu \

@@ -1,11 +1,10 @@
 import { useState, type FormEvent } from "react";
-import { Navigate, useLocation, useNavigate, type Location } from "react-router-dom";
+import { Navigate, useLocation, type Location } from "react-router-dom";
 import { useAuth } from "../context/useAuth";
 import { ApiError } from "../lib/api";
 
 export function Login() {
   const { user, login } = useAuth();
-  const navigate = useNavigate();
   const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -13,6 +12,9 @@ export function Login() {
   const [submitting, setSubmitting] = useState(false);
 
   if (user) {
+    // ログイン前に別ページへのアクセスで/loginへ飛ばされた場合(RequireAuth)は
+    // 元のページへ戻す。ログイン成功後もuserが更新されてここを通るため、
+    // handleSubmit側でnavigateを呼ぶ必要はない。
     const from = (location.state as { from?: Location } | null)?.from?.pathname ?? "/";
     return <Navigate to={from} replace />;
   }
@@ -23,7 +25,6 @@ export function Login() {
     setSubmitting(true);
     try {
       await login(email, password);
-      navigate("/", { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setError("メールアドレスまたはパスワードが違います");

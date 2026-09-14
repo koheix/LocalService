@@ -1,6 +1,15 @@
 :8080 {
 	root * /srv
 	encode gzip
+
+	# ハッシュ付きファイル名(Viteのビルド成果物)は長期キャッシュしてよいが、
+	# index.html等それ以外は常に最新を取得させる(古いSPAが新しいAPI契約と
+	# 食い違う事故を防ぐ)。両matcherは互いに排他的にする。
+	@immutable path /assets/*
+	@notImmutable not path /assets/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+	header @notImmutable Cache-Control "no-cache"
+
 	try_files {path} /index.html
 	file_server
 }
