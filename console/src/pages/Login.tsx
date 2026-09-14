@@ -14,8 +14,9 @@ export function Login() {
   if (user) {
     // ログイン前に別ページへのアクセスで/loginへ飛ばされた場合(RequireAuth)は
     // 元のページへ戻す。ログイン成功後もuserが更新されてここを通るため、
-    // handleSubmit側でnavigateを呼ぶ必要はない。
-    const from = (location.state as { from?: Location } | null)?.from?.pathname ?? "/";
+    // handleSubmit側でnavigateを呼ぶ必要はない。pathnameだけでなくsearch/hash
+    // も含めて復帰させる(クエリ付きの深リンクを壊さない)。
+    const from = (location.state as { from?: Location } | null)?.from ?? "/";
     return <Navigate to={from} replace />;
   }
 
