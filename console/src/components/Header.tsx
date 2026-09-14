@@ -1,5 +1,6 @@
 import { Cpu } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "../context/useAuth";
 
 function initialOf(text: string): string {
@@ -35,12 +36,12 @@ export function Header() {
 
   return (
     <header className="flex items-center justify-between border-b border-gray-200 px-4 py-3 dark:border-gray-700">
-      <div className="flex items-center gap-2">
+      <Link to="/" className="flex items-center gap-2">
         <Cpu className="h-6 w-6 text-blue-600 dark:text-blue-400" aria-hidden />
         <span className="text-lg font-semibold text-gray-900 dark:text-gray-100">
           LLM Console
         </span>
-      </div>
+      </Link>
 
       <div className="relative" ref={menuRef}>
         <button

@@ -4,6 +4,7 @@ import { RequireAuth } from "./components/RequireAuth";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { Placeholder } from "./pages/Placeholder";
+import { Playground } from "./pages/Playground";
 
 function placeholderRoute(path: string, title: string, note: string, adminOnly = false) {
   const content = adminOnly ? (
@@ -13,9 +14,7 @@ function placeholderRoute(path: string, title: string, note: string, adminOnly =
   ) : (
     <Placeholder title={title} note={note} />
   );
-  return (
-    <Route key={path} path={path} element={<RequireAuth>{content}</RequireAuth>} />
-  );
+  return <Route key={path} path={path} element={<RequireAuth>{content}</RequireAuth>} />;
 }
 
 export function App() {
@@ -30,11 +29,14 @@ export function App() {
           </RequireAuth>
         }
       />
-      {placeholderRoute(
-        "/playground",
-        "プレイグラウンド",
-        "この画面はT-21で実装します。モデルを選んで対話するチャットUIです。",
-      )}
+      <Route
+        path="/playground"
+        element={
+          <RequireAuth>
+            <Playground />
+          </RequireAuth>
+        }
+      />
       {placeholderRoute(
         "/rag",
         "社内文書検索",
