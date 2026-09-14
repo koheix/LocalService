@@ -5,6 +5,7 @@ import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { Placeholder } from "./pages/Placeholder";
 import { Playground } from "./pages/Playground";
+import { Rag } from "./pages/Rag";
 
 function placeholderRoute(path: string, title: string, note: string, adminOnly = false) {
   const content = adminOnly ? (
@@ -37,11 +38,14 @@ export function App() {
           </RequireAuth>
         }
       />
-      {placeholderRoute(
-        "/rag",
-        "社内文書検索",
-        "この画面はT-22で実装します。資料をアップロードして質問できます。",
-      )}
+      <Route
+        path="/rag"
+        element={
+          <RequireAuth>
+            <Rag />
+          </RequireAuth>
+        }
+      />
       {placeholderRoute(
         "/transcription",
         "文字起こし",
