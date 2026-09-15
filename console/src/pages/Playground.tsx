@@ -187,7 +187,7 @@ export function Playground() {
           ) : (
             <>
               <SettingsPanel models={models} form={form} onChange={setForm} onSave={handleSaveSettings} />
-              <MessageList messages={messages} />
+              <MessageList messages={messages} sending={sending} />
               <form onSubmit={handleSend} className="flex gap-2 border-t border-gray-200 p-3 dark:border-gray-700">
                 <textarea
                   rows={2}
