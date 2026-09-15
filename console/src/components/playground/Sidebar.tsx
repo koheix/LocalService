@@ -1,4 +1,5 @@
 import { Plus, X } from "lucide-react";
+import { useEffect } from "react";
 import type { Conversation } from "../../lib/conversationsApi";
 
 export function Sidebar({
@@ -19,6 +20,16 @@ export function Sidebar({
   open?: boolean;
   onClose?: () => void;
 }) {
+  // Header.tsxのユーザーメニューと同様、Escで閉じられるようにする。
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose?.();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
   return (
     <>
       {/* モバイルでサイドバーを開いているときの背景オーバーレイ。タップで閉じる。 */}
@@ -30,6 +41,10 @@ export function Sidebar({
         />
       )}
       <aside
+        id="playground-sidebar"
+        role="dialog"
+        aria-label="会話一覧"
+        aria-modal={open}
         className={
           "flex w-64 flex-none flex-col gap-3 border-r border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/40 " +
           "fixed inset-y-0 left-0 z-30 transition-transform duration-200 sm:static sm:z-auto sm:translate-x-0 " +
@@ -49,7 +64,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={onClose}
-            aria-label="閉じる"
+            aria-label="会話一覧を閉じる"
             className="rounded-lg p-2 text-gray-500 hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-800 sm:hidden"
           >
             <X className="h-5 w-5" aria-hidden />

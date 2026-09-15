@@ -66,6 +66,10 @@ export function Playground() {
       setModels(modelsRes.data.filter((m) => m.kind === "chat"));
       if (convList.length > 0) {
         await selectConversation(convList[0].id);
+      } else {
+        // 会話が1件も無いと「新しい会話を始める」ボタンがドロワーの中に
+        // 隠れて見えなくなる(sm未満)。狭い画面では開いておく。
+        setSidebarOpen(true);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -164,6 +168,8 @@ export function Playground() {
               type="button"
               onClick={() => setSidebarOpen(true)}
               aria-label="会話一覧を開く"
+              aria-expanded={sidebarOpen}
+              aria-controls="playground-sidebar"
               className="rounded-lg p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
             >
               <Menu className="h-5 w-5" aria-hidden />
