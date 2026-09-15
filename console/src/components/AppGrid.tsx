@@ -23,7 +23,7 @@ const APPS: AppDef[] = [
     name: "社内文書検索",
     description: "資料を読み込んで質問する",
     icon: FileSearch,
-    status: "phase2",
+    status: "available",
     to: "/rag",
   },
   {

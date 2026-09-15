@@ -41,6 +41,48 @@ async def test_create_conversation_unknown_model_404(
     assert body["error"]["code"] == "NOT_FOUND"
 
 
+async def test_create_conversation_rejects_embedding_model(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable
+) -> None:
+    """会話にembeddingモデルを設定しようとしても404になること。
+
+    存在しないモデルと同じ扱いにし、embeddingモデルの存在自体は漏らさない。
+    console(Playground)側でkind="chat"のみに絞る修正を入れたが、API直叩き
+    でも同じ不整合(会話作成は通るのに送信時に初めて404になる)が起きない
+    よう、サーバー側でも作成・更新の両方で弾く。
+
+    確認済み: conversations.py の _resolve_model から Model.kind == "chat"
+    の条件を外すと、本テストが失敗する(201が返ってしまう)。
+    """
+    await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+
+    created = await client.post(
+        "/api/conversations", json={"title": "テスト", "model": embed_model.served_name}
+    )
+    assert created.status_code == 404
+    assert created.json()["error"]["code"] == "NOT_FOUND"
+
+
+async def test_update_conversation_rejects_embedding_model(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable
+) -> None:
+    await login_as_new_user()
+    chat_model = await make_model(kind="chat")
+    embed_model = await make_model(kind="embedding")
+
+    created = await client.post(
+        "/api/conversations", json={"title": "テスト", "model": chat_model.served_name}
+    )
+    conversation_id = created.json()["id"]
+
+    resp = await client.patch(
+        f"/api/conversations/{conversation_id}", json={"model": embed_model.served_name}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "NOT_FOUND"
+
+
 async def test_update_conversation_settings(
     client: AsyncClient, login_as_new_user: Callable, make_model: Callable
 ) -> None:

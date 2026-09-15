@@ -19,6 +19,14 @@ export function onUnauthorized(handler: UnauthorizedHandler): () => void {
   return () => unauthorizedHandlers.delete(handler);
 }
 
+/**
+ * apiFetchを経由しない生fetch(SSEストリーミングなど)が401を検知したときに、
+ * apiFetchが401時に行うのと同じ通知を行うためのもの。
+ */
+export function notifyUnauthorized(): void {
+  for (const handler of unauthorizedHandlers) handler();
+}
+
 type ApiFetchOptions = Omit<RequestInit, "body"> & {
   body?: BodyInit | Record<string, unknown>;
 };
