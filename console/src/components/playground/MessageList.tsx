@@ -15,7 +15,7 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
         <div
           key={i}
           className={
-            "max-w-[70%] whitespace-pre-wrap break-words rounded-2xl px-4 py-2 " +
+            "max-w-[90%] whitespace-pre-wrap break-words rounded-2xl px-4 py-2 sm:max-w-[70%] " +
             (m.role === "user"
               ? "self-end bg-blue-600 text-white"
               : "self-start bg-gray-200 text-gray-900 dark:bg-gray-700 dark:text-gray-100")

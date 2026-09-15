@@ -25,6 +25,11 @@ export function SettingsPanel({
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 狭い画面(sm未満)では既定で折りたたんでおく。MessageListの表示領域を
+  // 確保するため。sm以上は従来どおり常に開いた状態から始める。
+  const [open, setOpen] = useState(
+    () => typeof window === "undefined" || window.matchMedia("(min-width: 640px)").matches,
+  );
 
   useEffect(() => {
     return () => {
@@ -48,7 +53,11 @@ export function SettingsPanel({
   }
 
   return (
-    <details className="border-b border-gray-200 px-4 py-2 dark:border-gray-700" open>
+    <details
+      className="border-b border-gray-200 px-4 py-2 dark:border-gray-700"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
       <summary className="cursor-pointer text-sm text-gray-500 dark:text-gray-400">
         会話設定
       </summary>
