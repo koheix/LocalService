@@ -371,3 +371,9 @@ D-014のビルド不要方針が適していたが、画面数の増加（ホー
   既存のテスト契約を持つ別機能への変更は本タスクの範囲外と判断した。
   実際の利用状況画面を作る際（T-20より後のタスク）に、この不一致を
   解消するかどうかを改めて判断すること。
+
+**追記（T-28、上記の不一致を解消。ユーザー確認済み）**
+`GET /api/admin/usage?group_by=day`も`/api/admin/summary`と同じくJST基準に
+統一した。`func.date(UsageLog.created_at)`をそのまま使わず、
+`func.date(func.timezone('Asia/Tokyo', UsageLog.created_at))`でJSTへ変換
+してから日付を取り出す形に変更した。

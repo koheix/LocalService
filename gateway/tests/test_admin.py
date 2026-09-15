@@ -523,6 +523,52 @@ async def test_admin_usage_date_range_boundaries(
     assert matching[0]["request_count"] == 1
 
 
+async def test_admin_usage_group_by_day_uses_jst_boundary(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable, db: AsyncSession
+) -> None:
+    """日別集計はJST基準で区切ること(/api/admin/summaryの「今日」と同じ基準。
+
+    T-28、D-017追記でユーザー確認済み)。UTC 23:30(=JST翌日08:30)のログが、
+    UTC日付ではなくJST日付に区切られることを確認する。
+
+    確認済み: admin.pyのgroup_by=="day"のkey_colを`func.date(UsageLog.created_at)`
+    (JST変換なし)に戻すと、本テストで"2030-01-02"に集計されるはずのログが
+    "2030-01-01"に集計されてしまい失敗する。
+    """
+    user = await login_as_new_user(role="admin")
+    model = await make_model()
+
+    db.add(
+        UsageLog(
+            user_id=user.id,
+            model_id=model.id,
+            app="api",
+            prompt_tokens=1,
+            completion_tokens=1,
+            latency_ms=1,
+            status="ok",
+            created_at=datetime(2030, 1, 1, 23, 30, tzinfo=UTC),  # JSTでは2030-01-02 08:30
+        )
+    )
+    await db.commit()
+
+    resp = await client.get(
+        "/api/admin/usage",
+        params={
+            "from": "2020-01-01T00:00:00",
+            "to": "2100-01-01T00:00:00",
+            "group_by": "day",
+            # 他のテスト(test_admin_usage_date_range_boundaries等)も2030年台の
+            # 日付にusage_logsを作るため、user_idで自分の分だけに絞る
+            # (絞らないと他テストのログが同じ日付バケットに混ざり得る)。
+            "user_id": user.id,
+        },
+    )
+    assert resp.status_code == 200
+    days = {r["day"] for r in resp.json()["data"]}
+    assert days == {"2030-01-02"}
+
+
 async def test_admin_usage_user_id_filter(
     client: AsyncClient, login_as_new_user: Callable, make_model: Callable
 ) -> None:

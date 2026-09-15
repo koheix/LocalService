@@ -45,3 +45,68 @@ export function fetchGpu(): Promise<GpuResponse> {
 export function fetchSummary(): Promise<SummaryResponse> {
   return apiFetch<SummaryResponse>("/api/admin/summary");
 }
+
+export type UsageGroupBy = "day" | "user" | "model";
+
+// group_byに応じて day/user/model のいずれか1つだけが入る(gateway側の実装参照)。
+export type UsageRow = {
+  day?: string;
+  user?: number;
+  model?: number;
+  request_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+};
+
+export type UsageResponse = {
+  group_by: UsageGroupBy;
+  data: UsageRow[];
+};
+
+// /usage はadmin限定。fromToはISO 8601文字列(タイムゾーン省略時はUTC扱いに
+// なるため、呼び出し側で明示するかUTC前提で扱うこと)。
+export function fetchUsage(params: {
+  from: string;
+  to: string;
+  group_by: UsageGroupBy;
+  user_id?: number;
+}): Promise<UsageResponse> {
+  const search = new URLSearchParams({
+    from: params.from,
+    to: params.to,
+    group_by: params.group_by,
+  });
+  if (params.user_id !== undefined) search.set("user_id", String(params.user_id));
+  return apiFetch<UsageResponse>(`/api/admin/usage?${search.toString()}`);
+}
+
+export type UserOut = {
+  id: number;
+  email: string;
+  display_name: string;
+  role: string;
+  is_active: boolean;
+  created_at: string;
+};
+
+export type ModelOut = {
+  id: number;
+  served_name: string;
+  backend: string;
+  backend_name: string;
+  kind: string;
+  num_ctx: number;
+  is_enabled: boolean;
+  description: string;
+  permitted_roles: string[];
+};
+
+// 利用状況画面でuser_id/model_idを表示名に解決するためだけに使う
+// (ユーザー管理・モデル管理画面自体は別タスク)。
+export function listUsers(): Promise<UserOut[]> {
+  return apiFetch<UserOut[]>("/api/admin/users");
+}
+
+export function listModels(): Promise<ModelOut[]> {
+  return apiFetch<ModelOut[]>("/api/admin/models");
+}
