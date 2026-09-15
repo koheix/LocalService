@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import hash_password
@@ -523,32 +524,71 @@ async def test_admin_usage_date_range_boundaries(
     assert matching[0]["request_count"] == 1
 
 
+async def test_db_session_timezone_is_pinned_to_utc(db: AsyncSession) -> None:
+    """DBセッションのタイムゾーンがUTCに固定されていること。
+
+    これが固定されていないと、group_by=dayのJST変換
+    (`func.timezone("Asia/Tokyo", ...)`)の効果がセッションTZ次第で変わって
+    しまう。PostgreSQLの`date(timestamptz)`はセッションTZのローカル時刻に
+    変換してから日付を取る仕様なので、セッションTZがたまたま`Asia/Tokyo`に
+    なった場合、JST変換の有無に関わらず結果が一致してしまい、
+    `test_admin_usage_group_by_day_uses_jst_boundary`のようなテストが
+    「セッションTZがたまたまUTCだから通る」だけの状態になり、本番環境や
+    DBの設定変更で無自覚に壊れる(T-28レビューで発覚)。
+
+    確認済み: `app/db.py`の`connect_args`の`server_settings`(timezone指定)を
+    外すと、本テストが(このリポジトリのdocker-compose.ymlのpostgresイメージ
+    の既定である"Etc/UTC"を返すため現時点ではたまたま通ってしまうが)
+    タイムゾーンが保証されていない状態に戻る。
+    """
+    result = await db.execute(text("SHOW TimeZone"))
+    tz = result.scalar_one()
+    assert tz == "UTC"
+
+
 async def test_admin_usage_group_by_day_uses_jst_boundary(
     client: AsyncClient, login_as_new_user: Callable, make_model: Callable, db: AsyncSession
 ) -> None:
     """日別集計はJST基準で区切ること(/api/admin/summaryの「今日」と同じ基準。
 
-    T-28、D-017追記でユーザー確認済み)。UTC 23:30(=JST翌日08:30)のログが、
-    UTC日付ではなくJST日付に区切られることを確認する。
+    T-28、D-017追記でユーザー確認済み)。JSTの日境界はUTC 15:00:00ちょうど
+    なので、その前後1秒(UTC 14:59:59 / 15:00:00)の2件を仕込み、それぞれが
+    別の日付バケットに割り振られることを確認する。単に「東にずれる」ことを
+    確認するだけでは、Asia/Tokyo(+9)ではなくAsia/Shanghai(+8)や
+    Asia/Kolkata(+5:30)等、別のオフセットに書き換える変異を検出できない
+    ため、境界ちょうどのペアで固定する(test_admin_usage_date_range_boundaries
+    の境界値の手法を踏襲)。集計値(request_count/prompt_tokens/
+    completion_tokens)まで完全一致で固定し、集計そのものが壊れる変異
+    (sum対象の取り違え等)も検出できるようにする。
 
     確認済み: admin.pyのgroup_by=="day"のkey_colを`func.date(UsageLog.created_at)`
-    (JST変換なし)に戻すと、本テストで"2030-01-02"に集計されるはずのログが
-    "2030-01-01"に集計されてしまい失敗する。
+    (JST変換なし)に戻すと、本テストの完全一致比較が失敗する
+    (UTC 14:59:59のログが"2030-01-02"ではなく"2030-01-01"に、UTC 15:00:00の
+    ログが"2030-01-03"ではなく"2030-01-02"に集計されてしまうため)。
     """
     user = await login_as_new_user(role="admin")
     model = await make_model()
 
-    db.add(
-        UsageLog(
+    def _log(offset: timedelta, prompt_tokens: int, completion_tokens: int) -> UsageLog:
+        base = datetime(2030, 1, 2, 15, 0, 0, tzinfo=UTC)  # JST 2030-01-03 00:00:00
+        return UsageLog(
             user_id=user.id,
             model_id=model.id,
             app="api",
-            prompt_tokens=1,
-            completion_tokens=1,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             latency_ms=1,
             status="ok",
-            created_at=datetime(2030, 1, 1, 23, 30, tzinfo=UTC),  # JSTでは2030-01-02 08:30
+            created_at=base + offset,
         )
+
+    db.add_all(
+        [
+            # JST境界の1秒前 → JST 2030-01-02 23:59:59 → "2030-01-02"バケット
+            _log(-timedelta(seconds=1), prompt_tokens=3, completion_tokens=4),
+            # JST境界ちょうど → JST 2030-01-03 00:00:00 → "2030-01-03"バケット
+            _log(timedelta(0), prompt_tokens=7, completion_tokens=1),
+        ]
     )
     await db.commit()
 
@@ -565,8 +605,10 @@ async def test_admin_usage_group_by_day_uses_jst_boundary(
         },
     )
     assert resp.status_code == 200
-    days = {r["day"] for r in resp.json()["data"]}
-    assert days == {"2030-01-02"}
+    assert resp.json()["data"] == [
+        {"day": "2030-01-02", "request_count": 1, "prompt_tokens": 3, "completion_tokens": 4},
+        {"day": "2030-01-03", "request_count": 1, "prompt_tokens": 7, "completion_tokens": 1},
+    ]
 
 
 async def test_admin_usage_user_id_filter(

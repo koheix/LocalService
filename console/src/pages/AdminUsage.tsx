@@ -16,15 +16,26 @@ const GROUP_BY_LABELS: Record<UsageGroupBy, string> = {
   model: "モデル別",
 };
 
-function toDateInputValue(d: Date): string {
+/** JSTの暦日("YYYY-MM-DD")を返す。JSTはDSTが無いため固定オフセットで安全。 */
+function jstToday(): string {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
+}
+
+/** 日付文字列("YYYY-MM-DD")に対する純粋な暦日の加減算。時刻・タイムゾーンの
+ * 概念は持ち込まず、日付ラベルの計算にのみUTCを内部的に使う。 */
+function shiftDateString(dateStr: string, days: number): string {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
 
+function isValidDateString(s: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(`${s}T00:00:00Z`).getTime());
+}
+
 function defaultRange(): { from: string; to: string } {
-  const to = new Date();
-  const from = new Date(to);
-  from.setDate(from.getDate() - 7);
-  return { from: toDateInputValue(from), to: toDateInputValue(to) };
+  const to = jstToday();
+  return { from: shiftDateString(to, -7), to };
 }
 
 /**
@@ -54,13 +65,21 @@ export function AdminUsage() {
 
   useEffect(() => {
     let cancelled = false;
-    // toは日付入力(00:00始まり)なので、その日を含めるため翌日00:00未満まで
+    // 日付入力は<input type="date">でクリアされ得る(空文字になる)。その間は
+    // 問い合わせない(Invalid Dateのままfetchすると例外になり、画面が
+    // 白くなってしまう)。
+    if (!isValidDateString(range.from) || !isValidDateString(range.to)) {
+      return;
+    }
+    // 開始日・終了日はJSTの暦日として扱う(group_by=dayの日別集計がJST基準
+    // になっているため、範囲の絞り込みもJSTに揃えないと、選んだ日付の
+    // JST 00:00〜09:00が抜け落ちたり、選んでいない日付が混ざったりする)。
+    // 終了日はその日を含めるため、翌日のJST 00:00未満まで
     // (gateway側は from<=created_at<to の半開区間、docs/API.md参照)。
-    const toExclusive = new Date(`${range.to}T00:00:00Z`);
-    toExclusive.setUTCDate(toExclusive.getUTCDate() + 1);
+    const toExclusiveJstDate = shiftDateString(range.to, 1);
     fetchUsage({
-      from: `${range.from}T00:00:00Z`,
-      to: toExclusive.toISOString(),
+      from: `${range.from}T00:00:00+09:00`,
+      to: `${toExclusiveJstDate}T00:00:00+09:00`,
       group_by: groupBy,
     })
       .then((res) => {

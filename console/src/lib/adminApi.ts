@@ -51,8 +51,10 @@ export type UsageGroupBy = "day" | "user" | "model";
 // group_byに応じて day/user/model のいずれか1つだけが入る(gateway側の実装参照)。
 export type UsageRow = {
   day?: string;
-  user?: number;
-  model?: number;
+  // usage_logs.user_id/model_idはON DELETE SET NULLなので、削除済みの
+  // ユーザー/モデル分の行はnullになり得る。
+  user?: number | null;
+  model?: number | null;
   request_count: number;
   prompt_tokens: number;
   completion_tokens: number;
