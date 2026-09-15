@@ -34,7 +34,9 @@ export function MessageList({
             }
           >
             {isStreamingTarget && m.content === "" ? (
-              <span className="italic text-gray-500 dark:text-gray-400">生成中…</span>
+              <span role="status" className="italic text-gray-600 dark:text-gray-300">
+                生成中…
+              </span>
             ) : (
               <>
                 {m.content}
