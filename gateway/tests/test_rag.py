@@ -15,11 +15,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.main import app
 from app.models import Chunk, Document, Model, UsageLog
 from tests.conftest import FakeBackend
 
@@ -35,7 +36,8 @@ async def _read_rag_events(resp: Any) -> list[dict]:
 
     `data: [DONE]`で終端することを契約(docs/API.md)として固定するため、
     最後まで読んでも[DONE]が来なければ失敗させる(黙って空リストや途中の
-    イベント列を返さない)。
+    イベント列を返さない)。[DONE]の後にさらにイベントが来た場合も、
+    それを黙って集約せず失敗させる([DONE]は最後の1回だけの契約)。
     """
     events: list[dict] = []
     saw_done = False
@@ -44,6 +46,7 @@ async def _read_rag_events(resp: Any) -> list[dict]:
             line = line.strip()
             if not line.startswith("data: "):
                 continue
+            assert not saw_done, "data: [DONE] の後にさらにイベントが送られている"
             payload = line[len("data: ") :]
             if payload == "[DONE]":
                 saw_done = True
@@ -208,6 +211,12 @@ async def test_rag_query_returns_citation_for_relevant_chunk(
     assert sent["model"] == chat_model.backend_name
     assert chunk.content in sent["messages"][1]["content"]
     assert "GTX 1080のVRAMは？" in sent["messages"][1]["content"]
+    assert sent["stream"] is True
+    # with_stream_usage()が付与するオプション。これが無いと実際のOllamaは
+    # usageを返さず、usage_logsのprompt_tokens/completion_tokensが常に0に
+    # なる(FakeBackendは無視して常にusageを返すため、これを外しても
+    # 他のusage_logs系アサーションだけでは検知できない)。
+    assert sent["stream_options"] == {"include_usage": True}
     assert fake_embed.embed_calls == [(["GTX 1080のVRAMは？"], embed_model.backend_name)]
 
 
@@ -325,10 +334,13 @@ async def test_rag_query_concurrency_slot_held_during_answer_streaming(
     確認済み(両方の変異を実際に当てて検証): rag.pyの`_wrapped_stream`内
     `finally`の`concurrency_slots.release`を削除すると、スロットが永久に
     解放されなくなり、本テストの2本目(resp2, 429を期待)ではなく3本目
-    (resp3, 200を期待)が失敗する。逆に、`concurrency_slots.acquire`直後
-    ([相関: rag.pyの`if not concurrency_slots.acquire(...)`の直後]に
-    `concurrency_slots.release`を呼ぶよう早めてスロットをすぐ手放すと、
-    2本目が429ではなく200になり失敗する。
+    (resp3, 200を期待)が失敗する。逆に、`concurrency_slots.acquire`の
+    直後に`concurrency_slots.release`を呼ぶよう早めてスロットをすぐ手放す
+    と、2本目のリクエストはスロットを正常に取得できてしまい、`resp2`への
+    アサーション失敗(429を期待して200になる)ではなく、その`resp2`用の
+    `BlockingChatBackend`インスタンスも同じ`release`(まだset()されていない)
+    でブロックしたまま`asyncio.wait_for(..., timeout=5)`がタイムアウトする
+    形で失敗する。
 
     同期は`BlockingChatBackend`が最初のdeltaを送った直後、実際に
     `release.wait()`でブロックする直前にサーバー側で`asyncio.Event`を
@@ -681,25 +693,34 @@ async def test_rag_query_chat_backend_raises_and_logs_error(
     class BrokenChatBackend(FakeBackend):
         async def chat_stream(self, payload: dict):
             self.chat_stream_calls.append(payload)
+            yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
             raise RuntimeError("チャットバックエンドが意図的に落ちたテスト用の障害")
-            yield b""  # pragma: no cover (ジェネレータにするための到達不能yield)
 
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: BrokenChatBackend())
 
-    # 実運用のuvicorn配下では、200(ヘッダ送信済み)の後にストリーム本体側で
-    # 例外が起きて接続が異常終了する形になるはず。ただし、このテストで使う
-    # httpxのASGITransportでは、ストリームが最終的に失敗する場合
-    # `client.stream()`のコンテキストマネージャ自体がその例外を送出し、
-    # `resp`(status_code含む)には一切アクセスできないことを実験で確認した
-    # (見せかけの成功を避けるため、届かないassertを`with`の内側には置かない)。
-    # そのため、ここでは「例外が呼び出し元まで伝播すること」と「usage_logsに
-    # 正しく記録されること」を検証する。match=で、テスト対象と無関係な
-    # RuntimeError(httpx/anyio側が投げうる)まで拾ってしまわないようにする。
-    with pytest.raises(RuntimeError, match="意図的に落ちた"):
-        async with client.stream(
+    # docs/API.mdの契約(200を返した後にストリーム本体側で例外が起きて接続が
+    # 異常終了する)を実際に検証する。既定のclientフィクスチャは
+    # ASGITransport(raise_app_exceptions=True、デバッグ用の既定値)なので、
+    # アプリ内の未処理例外がテストコードへそのまま再送出され、
+    # `client.stream()`の`__aenter__`自体が失敗してresp/status_codeに
+    # 一切アクセスできない(実験で確認済み)。これでは「200が返った後で
+    # 途中終了する」ことを検証できないため、この1点だけ
+    # raise_app_exceptions=Falseの別クライアントを使う。これは実運用の
+    # uvicorn配下での実際の挙動(未処理例外は、ヘッダ送信済みなら200のまま
+    # 本文が途中で終わり、そうでなければ500になる)により近い。
+    lenient_transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(
+        transport=lenient_transport, base_url="http://testserver", cookies=client.cookies
+    ) as lenient_client:
+        async with lenient_client.stream(
             "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
         ) as resp:
-            await _read_rag_events(resp)
+            assert resp.status_code == 200  # ヘッダは正常に送信済み
+            body = b"".join([c async for c in resp.aiter_bytes()])
+
+    assert b'"type": "status"' in body  # 最初のイベントまでは届いている
+    assert b'"type": "delta"' in body
+    assert b"[DONE]" not in body  # 正常完走せず途中で切れている(citationsも届かない)
 
     result = await db.execute(
         select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
@@ -770,6 +791,227 @@ async def test_rag_query_stream_ignores_chunks_without_choices(
     logs = result.scalars().all()
     assert len(logs) == 1
     assert logs[0].status == "ok"
+
+
+async def test_rag_query_stream_reassembles_delta_split_across_chunks(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """バックエンドのSSEチャンク境界が`data:`行の途中で分割されても、
+
+    内容を欠落させずに再構成できること。RAGは/api/v1・/api/conversationsと
+    異なり生バイト列を素通ししてクライアント側で再組み立てさせるのではなく、
+    サーバー側(rag.py)がフロント向けJSONイベントの唯一の生成元になるため、
+    ここでの行再構成が壊れると回答が静かに欠落する。
+
+    確認済み: rag.pyの`_wrapped_stream`内の行バッファリング
+    (`line_buffer += raw_chunk.decode(...)`)をやめて、各チャンクを個別に
+    `raw_chunk.decode().split("\\n")`するだけの実装に戻すと、本テストの
+    `_answer_from_events(events) == "アルファ"`が失敗する(分断された
+    JSON行がjson.JSONDecodeErrorとして握りつぶされ、"アル"の分が
+    欠落した"ファ"だけになるため)。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    chat_model = await make_model(kind="chat")
+    await isolate_model(embed_model)
+    await isolate_model(chat_model)
+    await _add_chunk(db, user.id, _vec(1.0))
+    monkeypatch.setattr(
+        "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
+    )
+
+    full_line = "data: " + json.dumps(
+        {"choices": [{"delta": {"content": "アルファ"}}]}, ensure_ascii=False
+    )
+    split_at = len(full_line) // 2
+    assert 0 < split_at < len(full_line)  # 本当に行の途中で割れていることの前提確認
+
+    split_backend = FakeBackend()
+    split_backend.chat_stream_chunks = [
+        full_line[:split_at].encode(),  # 改行を含まない、行の途中で切れたチャンク
+        (full_line[split_at:] + "\n\n").encode(),  # 残りの半分 + 行末
+        b"data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: split_backend)
+
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        events = await _read_rag_events(resp)
+
+    assert _answer_from_events(events) == "アルファ"
+    assert len(_citations_from_events(events)) == 1
+
+
+async def test_rag_query_stream_flushes_trailing_line_without_newline(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """バックエンドの最後のチャンクが改行(`\\n\\n`)で終わらないまま
+
+    `chat_stream()`が終了しても、その行のdeltaが失われないこと
+    (ループ終了後のバッファflush、rag.py参照)。
+
+    確認済み: rag.pyの`_wrapped_stream`のループ後の
+    `if line_buffer.strip(): ...`フラッシュ処理を削除すると、本テストの
+    `_answer_from_events(events) == "ラスト"`が失敗する(末尾のdeltaが
+    バッファに残ったまま破棄され、空文字列になるため)。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    chat_model = await make_model(kind="chat")
+    await isolate_model(embed_model)
+    await isolate_model(chat_model)
+    await _add_chunk(db, user.id, _vec(1.0))
+    monkeypatch.setattr(
+        "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
+    )
+
+    no_trailing_newline = FakeBackend()
+    no_trailing_newline.chat_stream_chunks = [
+        (
+            "data: "
+            + json.dumps({"choices": [{"delta": {"content": "ラスト"}}]}, ensure_ascii=False)
+        ).encode()
+        # 意図的に末尾に \n\n を付けず、これで chat_stream() を終わらせる。
+    ]
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: no_trailing_newline)
+
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        events = await _read_rag_events(resp)
+
+    assert _answer_from_events(events) == "ラスト"
+    assert len(_citations_from_events(events)) == 1
+
+
+async def test_rag_query_usage_log_records_realistic_ttft(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ttft_msが単に非Noneであるだけでなく、実測に近い値であることを固定する。
+
+    (`is not None`だけの検証だと、rag.pyがttft_msを0固定にする退行を
+    見逃す。)最初のdeltaの前に意図的な遅延を入れ、ttft_msがその遅延以上、
+    かつ全体のlatency_ms以下であることを検証する。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    chat_model = await make_model(kind="chat")
+    await isolate_model(embed_model)
+    await isolate_model(chat_model)
+    await _add_chunk(db, user.id, _vec(1.0))
+    monkeypatch.setattr(
+        "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
+    )
+
+    class SlowFirstChunkBackend(FakeBackend):
+        async def chat_stream(self, payload: dict):
+            await asyncio.sleep(0.05)
+            async for chunk in super().chat_stream(payload):
+                yield chunk
+
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: SlowFirstChunkBackend())
+
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        await _read_rag_events(resp)
+
+    result = await db.execute(
+        select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 1
+    assert logs[0].ttft_ms is not None
+    assert logs[0].ttft_ms >= 50
+    assert logs[0].ttft_ms <= logs[0].latency_ms
+
+
+async def test_rag_query_client_disconnect_still_logs_usage(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """クライアント切断等でリクエストのタスク自体がキャンセルされても、
+
+    asyncio.shieldによりusage_logsへの記録が失われないこと
+    (test_v1.pyのtest_chat_completions_client_disconnect_still_logs_usageと
+    同型のRAG版。rag.pyの`_wrapped_stream`のfinally節のコメントが指す挙動)。
+
+    確認済み: rag.pyの該当`asyncio.shield(...)`を外して本テストのみ実行すると
+    `assert len(logs) == 1`が`0 == 1`で失敗する(記録が失われる)。元に戻すと
+    成功する。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    chat_model = await make_model(kind="chat")
+    await isolate_model(embed_model)
+    await isolate_model(chat_model)
+    await _add_chunk(db, user.id, _vec(1.0))
+    monkeypatch.setattr(
+        "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
+    )
+
+    started = asyncio.Event()
+
+    class SlowBackend(FakeBackend):
+        async def chat_stream(self, payload: dict):
+            self.chat_stream_calls.append(payload)
+            yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+            started.set()
+            await asyncio.sleep(30)  # 通常は到達しない。外側でタスクごとキャンセルする。
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: SlowBackend())
+
+    async def do_request() -> None:
+        async with client.stream(
+            "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+        ) as resp:
+            async for _ in resp.aiter_bytes():
+                pass
+
+    task = asyncio.create_task(do_request())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # shieldされたバックグラウンドの書き込みが完了するのを少し待つ。
+    for _ in range(20):
+        result = await db.execute(
+            select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
+        )
+        if result.scalars().all():
+            break
+        await asyncio.sleep(0.05)
+
+    result = await db.execute(
+        select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 1
 
 
 async def test_rag_query_stream_completes_with_empty_answer(
