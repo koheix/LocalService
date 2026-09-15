@@ -44,9 +44,9 @@ async def test_create_conversation_unknown_model_404(
 async def test_create_conversation_rejects_embedding_model(
     client: AsyncClient, login_as_new_user: Callable, make_model: Callable
 ) -> None:
-    """会話にembeddingモデルを設定しようとしても404になること(存在しない
+    """会話にembeddingモデルを設定しようとしても404になること。
 
-    モデルと同じ扱いにし、embeddingモデルの存在自体は漏らさない)。
+    存在しないモデルと同じ扱いにし、embeddingモデルの存在自体は漏らさない。
     console(Playground)側でkind="chat"のみに絞る修正を入れたが、API直叩き
     でも同じ不整合(会話作成は通るのに送信時に初めて404になる)が起きない
     よう、サーバー側でも作成・更新の両方で弾く。
