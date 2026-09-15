@@ -107,7 +107,11 @@ async def list_models(
     return {
         "object": "list",
         "data": [
-            {"id": m.served_name, "object": "model", "owned_by": "local"} for m in result.scalars()
+            # kind は OpenAI 互換の必須フィールドではないが、追加のみなら既存の
+            # OpenAI クライアントには無視される。console側がchat/embeddingを
+            # 区別してモデル選択できるようにするための加筆(D-003を破らない)。
+            {"id": m.served_name, "object": "model", "owned_by": "local", "kind": m.kind}
+            for m in result.scalars()
         ],
     }
 

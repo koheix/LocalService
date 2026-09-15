@@ -46,11 +46,14 @@
 ### `GET /api/v1/models`
 ```json
 { "object": "list", "data": [
-  { "id": "chat-standard", "object": "model", "owned_by": "local" }
+  { "id": "chat-standard", "object": "model", "owned_by": "local", "kind": "chat" }
 ]}
 ```
 返すのは **`models` テーブルの `served_name`** であって、Ollama の内部モデル名ではない。
-これによりモデル実体を差し替えてもクライアント側は無改修で済む。
+これによりモデル実体を差し替えてもクライアント側は無改修で済む。`kind`
+（`chat` | `embedding`）は OpenAI 互換の標準フィールドではない加筆で、
+console がチャット用途とembedding用途のモデルを区別するために使う
+（追加フィールドなので既存のOpenAI互換クライアントの動作は変えない）。
 
 ### `POST /api/v1/chat/completions`
 

@@ -29,6 +29,23 @@ async def test_list_models_returns_served_name(
     assert model.served_name in ids
 
 
+async def test_list_models_includes_kind(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable
+) -> None:
+    """console側がchat/embeddingを区別してデフォルトモデルを選ぶために使う
+
+    加筆フィールド(OpenAI互換の標準フィールドではない)。"""
+    await login_as_new_user()
+    chat_model = await make_model(kind="chat")
+    embed_model = await make_model(kind="embedding")
+
+    resp = await client.get("/api/v1/models")
+    assert resp.status_code == 200
+    by_id = {m["id"]: m["kind"] for m in resp.json()["data"]}
+    assert by_id[chat_model.served_name] == "chat"
+    assert by_id[embed_model.served_name] == "embedding"
+
+
 async def test_chat_completions_success(
     client: AsyncClient,
     login_as_new_user: Callable,

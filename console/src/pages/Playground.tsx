@@ -58,7 +58,10 @@ export function Playground() {
   useEffect(() => {
     (async () => {
       const [modelsRes, convList] = await Promise.all([listModels(), refreshConversations()]);
-      setModels(modelsRes.data);
+      // embeddingモデルはチャットに使えないため選択肢から外す。/api/v1/modelsは
+      // OpenAI互換の都合上kindを問わず全モデルを返すため、ここで絞り込む
+      // (絞らないと、新規会話のデフォルトモデルがembeddingモデルになりうる)。
+      setModels(modelsRes.data.filter((m) => m.kind === "chat"));
       if (convList.length > 0) {
         await selectConversation(convList[0].id);
       }

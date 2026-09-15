@@ -1,6 +1,11 @@
 import { apiFetch, ApiError, notifyUnauthorized } from "./api";
 
-export type ModelOut = { id: string; object: string; owned_by: string };
+export type ModelOut = {
+  id: string;
+  object: string;
+  owned_by: string;
+  kind: "chat" | "embedding";
+};
 
 export type Conversation = {
   id: number;
