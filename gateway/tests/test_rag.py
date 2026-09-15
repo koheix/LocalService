@@ -811,9 +811,12 @@ async def test_rag_query_stream_reassembles_delta_split_across_chunks(
     確認済み: rag.pyの`_wrapped_stream`内の行バッファリング
     (`line_buffer += raw_chunk.decode(...)`)をやめて、各チャンクを個別に
     `raw_chunk.decode().split("\\n")`するだけの実装に戻すと、本テストの
-    `_answer_from_events(events) == "アルファ"`が失敗する(分断された
-    JSON行がjson.JSONDecodeErrorとして握りつぶされ、"アル"の分が
-    欠落した"ファ"だけになるため)。
+    `_answer_from_events(events) == "アルファ"`が失敗する
+    (`_answer_from_events(events) == ""`になる。前半チャンクは改行が
+    無く"data: "で終わる不完全な行のためJSONDecodeErrorで捨てられ、
+    後半チャンクは"data: "で始まらない残骸行になるため、これも
+    `_extract_delta_event`の`line.startswith("data: ")`チェックで
+    弾かれ、"アルファ"が丸ごと欠落するため)。
     """
     user = await login_as_new_user()
     embed_model = await make_model(kind="embedding")
