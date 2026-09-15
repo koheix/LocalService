@@ -10,7 +10,9 @@ conftest.py の `isolate_model`/`isolate_models` フィクスチャで、テス�
 """
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import pytest
 from httpx import AsyncClient
@@ -26,6 +28,29 @@ def _vec(value: float, *, index: int = 0, dim: int = 1024) -> list[float]:
     v = [0.0] * dim
     v[index] = value
     return v
+
+
+async def _read_rag_events(resp: Any) -> list[dict]:
+    """RAGのSSEストリームを読み切り、イベント(dict)のリストを返す。"""
+    events: list[dict] = []
+    async for chunk in resp.aiter_bytes():
+        for line in chunk.decode("utf-8").splitlines():
+            line = line.strip()
+            if not line.startswith("data: "):
+                continue
+            payload = line[len("data: ") :]
+            if payload == "[DONE]":
+                continue
+            events.append(json.loads(payload))
+    return events
+
+
+def _answer_from_events(events: list[dict]) -> str:
+    return "".join(e["content"] for e in events if e["type"] == "delta")
+
+
+def _citations_from_events(events: list[dict]) -> list[dict]:
+    return next((e["citations"] for e in events if e["type"] == "citations"), [])
 
 
 class ControlledEmbedBackend(FakeBackend):
@@ -130,24 +155,30 @@ async def test_rag_query_returns_citation_for_relevant_chunk(
     monkeypatch.setattr("app.routers.rag.get_embed_backend", lambda: fake_embed)
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: fake_chat)
 
-    resp = await client.post("/api/rag/query", json={"question": "GTX 1080のVRAMは？"})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["answer"] == "fake reply"
-    citation_ids = [c["chunk_id"] for c in body["citations"]]
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        events = await _read_rag_events(resp)
+
+    assert events[0] == {"type": "status", "phase": "generating"}
+    assert _answer_from_events(events) == "fake"  # FakeBackend.chat_stream() の既定チャンク
+    citations = _citations_from_events(events)
+    citation_ids = [c["chunk_id"] for c in citations]
     assert chunk.id in citation_ids
-    match = next(c for c in body["citations"] if c["chunk_id"] == chunk.id)
+    match = next(c for c in citations if c["chunk_id"] == chunk.id)
     assert match["document_id"] == document.id
     assert match["filename"] == document.filename
+    assert len(citations) == 1
 
     # バックエンドに渡った実際のpayloadを検証する(served_nameではなくbackend_nameで送る, D-003)。
-    assert len(fake_chat.chat_calls) == 1
-    sent = fake_chat.chat_calls[0]
+    assert len(fake_chat.chat_stream_calls) == 1
+    sent = fake_chat.chat_stream_calls[0]
     assert sent["model"] == chat_model.backend_name
     assert chunk.content in sent["messages"][1]["content"]
     assert "GTX 1080のVRAMは？" in sent["messages"][1]["content"]
     assert fake_embed.embed_calls == [(["GTX 1080のVRAMは？"], embed_model.backend_name)]
-    assert len(body["citations"]) == 1
 
 
 async def test_rag_query_permission_denied_for_chat_model(
@@ -247,6 +278,74 @@ async def test_rag_query_concurrency_limited_and_released(
     assert resp3.status_code == 200
 
 
+async def test_rag_query_concurrency_slot_held_during_answer_streaming(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    make_quota: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-27でストリーミング化した後も、回答生成(chat_stream)が完走するまで
+
+    同時実行スロットが保持され続けること(検索フェーズだけでなく生成フェーズも
+    スロットの対象)。確認済み: rag.pyの`_wrapped_stream`内`finally`の
+    `concurrency_slots.release`を削除すると、本テストの2本目リクエストが
+    429ではなく200になり失敗する。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    chat_model = await make_model(kind="chat")
+    await isolate_model(embed_model)
+    await isolate_model(chat_model)
+    await make_quota(user.id, max_concurrent=1)
+    await _add_chunk(db, user.id, _vec(1.0))
+
+    release = asyncio.Event()
+    first_chunk_sent = asyncio.Event()
+
+    class BlockingChatBackend(FakeBackend):
+        async def chat_stream(self, payload: dict):
+            self.chat_stream_calls.append(payload)
+            yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
+            first_chunk_sent.set()
+            await release.wait()
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setattr(
+        "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
+    )
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: BlockingChatBackend())
+
+    async def hold_first() -> None:
+        async with client.stream(
+            "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+        ) as resp:
+            assert resp.status_code == 200
+            async for _ in resp.aiter_bytes():
+                break
+
+    task = asyncio.create_task(hold_first())
+    try:
+        await asyncio.wait_for(first_chunk_sent.wait(), timeout=5)
+        resp2 = await asyncio.wait_for(
+            client.post("/api/rag/query", json={"question": "hi"}), timeout=5
+        )
+        assert resp2.status_code == 429
+        assert resp2.json()["error"]["code"] == "RATE_LIMIT"
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    # ストリーム完了後はスロットが解放され、次のリクエストは成功する
+    # (release済みのため、同じBlockingChatBackendでも即座に完走する)。
+    resp3 = await asyncio.wait_for(
+        client.post("/api/rag/query", json={"question": "hi"}), timeout=5
+    )
+    assert resp3.status_code == 200
+
+
 async def test_rag_query_usage_log_when_no_relevant_chunks_records_embed_model(
     client: AsyncClient,
     login_as_new_user: Callable,
@@ -295,8 +394,11 @@ async def test_rag_query_usage_log_on_success_records_chat_model(
     )
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: FakeBackend())
 
-    resp = await client.post("/api/rag/query", json={"question": "GTX 1080のVRAMは？"})
-    assert resp.status_code == 200
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        await _read_rag_events(resp)  # ストリームを読み切ってfinally節を実行させる
 
     result = await db.execute(
         select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
@@ -305,7 +407,7 @@ async def test_rag_query_usage_log_on_success_records_chat_model(
     assert len(logs) == 1
     assert logs[0].status == "ok"
     assert logs[0].model_id == chat_model.id
-    assert logs[0].completion_tokens == 3  # FakeBackend.chat() の固定usage
+    assert logs[0].completion_tokens == 3  # FakeBackend.chat_stream() の固定usage
 
 
 async def test_rag_query_usage_log_on_rate_limited(
@@ -514,16 +616,22 @@ async def test_rag_query_chat_backend_raises_and_logs_error(
     )
 
     class BrokenChatBackend(FakeBackend):
-        async def chat(self, payload: dict) -> dict:
-            self.chat_calls.append(payload)
+        async def chat_stream(self, payload: dict):
+            self.chat_stream_calls.append(payload)
             raise RuntimeError("チャットバックエンドが意図的に落ちたテスト用の障害")
+            yield b""  # pragma: no cover (ジェネレータにするためのto到達不能yield)
 
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: BrokenChatBackend())
 
-    # httpxのASGITransportはハンドラ内の未処理例外を(500応答を送った後に)
-    # 呼び出し元へ再送出する。実運用のuvicorn配下では素の500応答になる。
+    # T-27でストリーミング化したため、200(ヘッダ送信済み)の後にストリーム本体側で
+    # 例外が起きる形になる。httpxのASGITransportはこの場合も未処理例外を
+    # 呼び出し元へ再送出する(実運用のuvicorn配下では接続が異常終了する)。
     with pytest.raises(RuntimeError):
-        await client.post("/api/rag/query", json={"question": "GTX 1080のVRAMは？"})
+        async with client.stream(
+            "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+        ) as resp:
+            assert resp.status_code == 200
+            await _read_rag_events(resp)
 
     result = await db.execute(
         select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
@@ -535,7 +643,7 @@ async def test_rag_query_chat_backend_raises_and_logs_error(
     assert logs[0].model_id == chat_model.id
 
 
-async def test_rag_query_chat_backend_empty_choices_raises_and_logs_error(
+async def test_rag_query_stream_ignores_chunks_without_choices(
     client: AsyncClient,
     login_as_new_user: Callable,
     make_model: Callable,
@@ -543,6 +651,11 @@ async def test_rag_query_chat_backend_empty_choices_raises_and_logs_error(
     isolate_model: Callable[[Model], Awaitable[None]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """バックエンドが`choices`が空/欠落したチャンクを混ぜて送ってきても、
+
+    (非ストリーミングだった旧実装のように`choices[0]`で例外にならず)
+    無視して残りのdeltaは正常に処理され、ストリームが最後まで完走すること。
+    """
     user = await login_as_new_user()
     embed_model = await make_model(kind="embedding")
     chat_model = await make_model(kind="chat")
@@ -554,23 +667,30 @@ async def test_rag_query_chat_backend_empty_choices_raises_and_logs_error(
         "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
     )
 
-    class EmptyChoicesChatBackend(FakeBackend):
-        async def chat(self, payload: dict) -> dict:
-            self.chat_calls.append(payload)
-            return {"id": "fake", "object": "chat.completion", "model": "x", "choices": []}
+    flaky = FakeBackend()
+    flaky.chat_stream_chunks = [
+        b'data: {"choices":[{"delta":{"content":"fa"}}]}\n\n',
+        b'data: {"choices":[]}\n\n',  # choicesが空(例: keep-aliveチャンク等)
+        b'data: {"choices":[{"delta":{"content":"ke"}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: flaky)
 
-    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: EmptyChoicesChatBackend())
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        events = await _read_rag_events(resp)
 
-    with pytest.raises(IndexError):
-        await client.post("/api/rag/query", json={"question": "GTX 1080のVRAMは？"})
+    assert _answer_from_events(events) == "fake"
+    assert len(_citations_from_events(events)) == 1
 
     result = await db.execute(
         select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
     )
     logs = result.scalars().all()
     assert len(logs) == 1
-    assert logs[0].status == "error"
-    assert logs[0].error_code == "IndexError"
+    assert logs[0].status == "ok"
 
 
 def _vec_cos(cos_sim: float, *, dim: int = 1024) -> list[float]:
@@ -622,10 +742,10 @@ async def test_rag_query_distance_threshold_boundary_is_inclusive(
     monkeypatch.setattr("app.routers.rag.get_embed_backend", lambda: fake_embed)
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: fake_chat)
 
-    resp = await client.post("/api/rag/query", json={"question": "hi"})
-    assert resp.status_code == 200
-    body = resp.json()
-    contents = [c["content"] for c in body["citations"]]
+    async with client.stream("POST", "/api/rag/query", json={"question": "hi"}) as resp:
+        assert resp.status_code == 200
+        events = await _read_rag_events(resp)
+    contents = [c["content"] for c in _citations_from_events(events)]
     assert contents == ["boundary-in"]
 
 
@@ -653,10 +773,10 @@ async def test_rag_query_limits_to_top_k(
     monkeypatch.setattr("app.routers.rag.get_embed_backend", lambda: fake_embed)
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: fake_chat)
 
-    resp = await client.post("/api/rag/query", json={"question": "hi"})
-    assert resp.status_code == 200
-    body = resp.json()
-    contents = [c["content"] for c in body["citations"]]
+    async with client.stream("POST", "/api/rag/query", json={"question": "hi"}) as resp:
+        assert resp.status_code == 200
+        events = await _read_rag_events(resp)
+    contents = [c["content"] for c in _citations_from_events(events)]
     assert contents == ["c0", "c1", "c2", "c3"]  # 最も遠いc4(cos_sim=0.8)は含まれない
 
     # citations に4件返るだけでなく、LLMへのプロンプトにも4件全ての内容・
@@ -664,8 +784,8 @@ async def test_rag_query_limits_to_top_k(
     # (citationsとLLMへの文脈が食い違わない)。部分一致だけの検証だと、
     # 出典名を丸ごと落とす・順序を入れ替える、といった劣化を検知できない
     # ため、完全一致で固定する。
-    assert len(fake_chat.chat_calls) == 1
-    sent_content = fake_chat.chat_calls[0]["messages"][1]["content"]
+    assert len(fake_chat.chat_stream_calls) == 1
+    sent_content = fake_chat.chat_stream_calls[0]["messages"][1]["content"]
     expected_context = "\n\n".join(f"[出典{n}: pytest-rag-doc.txt]\nc{n - 1}" for n in range(1, 5))
     assert sent_content == f"# コンテキスト\n{expected_context}\n\n# 質問\nhi"
 

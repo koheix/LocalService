@@ -135,22 +135,44 @@ BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成
 ```json
 { "question": "検証機のGPUは何ですか？" }
 ```
-→
+質問を埋め込み化し `chunks` をコサイン距離で検索する（この検索自体は
+同期処理で、通常は一瞬で終わる）。
+
+十分近いチャンクが無い場合は LLM を呼ばず、従来通り即座にJSON応答を返す。
 ```json
-{ "answer": "GeForce GTX 1080",
-  "citations": [
-    { "document_id": 6, "filename": "spec.txt", "chunk_id": 2,
-      "content": "検証機にはGeForce GTX 1080を使用しており..." }
-  ] }
+{ "answer": "関連する社内文書が見つかりませんでした。", "citations": [] }
 ```
-質問を埋め込み化し `chunks` をコサイン距離で検索する。十分近い
-チャンクが無い場合は LLM を呼ばず `citations: []` で
-「関連する社内文書が見つかりませんでした。」を返す。
+
+関連チャンクがあれば、チャット推論の結果を **SSEストリーミング
+(`Content-Type: text/event-stream`)** で返す（T-27）。フロントエンドは
+リクエスト送信からこのイベントが届くまでを「検索中」として表示し、
+最初のイベントを受けて「生成中」に切り替える想定。
+```
+data: {"type": "status", "phase": "generating"}
+
+data: {"type": "delta", "content": "GeForce"}
+
+data: {"type": "delta", "content": " GTX 1080"}
+
+data: {"type": "citations", "citations": [
+  {"document_id": 6, "filename": "spec.txt", "chunk_id": 2,
+   "content": "検証機にはGeForce GTX 1080を使用しており..."}
+]}
+
+data: [DONE]
+
+```
+`citations` は回答本文がすべて届いた後、最後にまとめて1回だけ送る。
+ストリーミング中にバックエンド側で例外が起きた場合は、200応答を返した
+後で接続が異常終了する（`/api/v1/chat/completions` や
+`/api/conversations/{id}/messages` のストリーミングと同じ扱い。
+専用のSSEエラーイベントは無い）。
 
 `/api/v1` と同様にレート制限・同時実行スロット・`usage_logs`（`app: "rag"`）の
 対象になる。関連文書が無く埋め込みのみ行った場合は埋め込みモデルを、
 チャット推論まで進んだ場合はチャット応答モデルを対象に1リクエスト1行で
 記録する（バックグラウンドの文書インデックス時の埋め込みは対象外。D-016）。
+ストリーミング時は同時実行スロットも回答生成が完了するまで保持される。
 
 ---
 

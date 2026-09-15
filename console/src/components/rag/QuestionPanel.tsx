@@ -1,29 +1,36 @@
 import { useState, type FormEvent } from "react";
-import { ragQuery, type Citation } from "../../lib/ragApi";
+import { ragQueryStream, type Citation } from "../../lib/ragApi";
+
+/** idle以外は質問中。searching→(関連文書があれば)generatingと遷移する(T-27)。 */
+type Phase = "idle" | "searching" | "generating";
 
 export function QuestionPanel() {
   const [question, setQuestion] = useState("");
-  const [asking, setAsking] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
   const [answer, setAnswer] = useState<string | null>(null);
   const [citations, setCitations] = useState<Citation[]>([]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     const q = question.trim();
-    if (!q || asking) return;
-    setAsking(true);
-    setAnswer("考え中...");
+    if (!q || phase !== "idle") return;
+    setPhase("searching");
+    setAnswer(null);
     setCitations([]);
     try {
-      const res = await ragQuery(q);
-      setAnswer(res.answer);
-      setCitations(res.citations);
+      await ragQueryStream(q, {
+        onGenerating: () => setPhase("generating"),
+        onDelta: (text) => setAnswer((prev) => (prev ?? "") + text),
+        onCitations: setCitations,
+      });
     } catch (err) {
       setAnswer(`[エラー] ${err instanceof Error ? err.message : "質問に失敗しました"}`);
     } finally {
-      setAsking(false);
+      setPhase("idle");
     }
   }
+
+  const asking = phase !== "idle";
 
   return (
     <section className="flex flex-col gap-3 rounded-xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-800">
@@ -48,11 +55,25 @@ export function QuestionPanel() {
         </button>
       </form>
 
-      {answer !== null && (
+      {(asking || answer !== null) && (
         <div className="flex flex-col gap-3 border-t border-gray-200 pt-3 dark:border-gray-700">
           <div>
             <h3 className="mb-1 text-xs font-semibold text-gray-500 dark:text-gray-400">回答</h3>
-            <p className="whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100">{answer}</p>
+            {answer === null ? (
+              <span role="status" className="text-sm italic text-gray-600 dark:text-gray-300">
+                {phase === "searching" ? "検索中…" : "回答を生成中…"}
+              </span>
+            ) : (
+              <p className="whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100">
+                {answer}
+                {asking && (
+                  <span
+                    className="ml-0.5 inline-block h-[1em] w-[2px] animate-pulse bg-current align-middle"
+                    aria-hidden
+                  />
+                )}
+              </p>
+            )}
           </div>
           {citations.length > 0 && (
             <div className="flex flex-col gap-2">

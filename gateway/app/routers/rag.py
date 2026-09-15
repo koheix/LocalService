@@ -10,13 +10,27 @@
 スロット)とは異なり、レート制限・スロットをモデル解決より先に行う
 (埋め込みモデル解決にもDBアクセスがあるため、権限の無いユーザーからの
 リクエストでも先に安価なレート制限で弾けるようにするため)。
+
+回答生成はSSEストリーミングで返す(T-27)。検索(埋め込み+ベクトル検索)は
+十分速いため同期的に行い、関連文書が見つからない場合はそのまま従来通り
+JSON即時応答(ストリーミングなし)を返す。関連文書があり実際にチャット
+推論を行う場合のみ、`text/event-stream`で
+`{"type":"status","phase":"generating"}` → `{"type":"delta","content":...}`
+(複数回) → `{"type":"citations","citations":[...]}` → `data: [DONE]`
+の順にイベントを送る。フロントエンド側は質問送信からこのイベント到着
+までの間を「検索中」として表示する(検索自体は同期処理なのでサーバー側に
+専用の"searching"イベントは存在しない)。
 """
 
 import asyncio
+import json
 import time
+from collections.abc import AsyncIterator
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +43,7 @@ from app.errors import AppError, NotFoundError, PermissionError_, RateLimitError
 from app.limits import concurrency_slots, rate_limiter
 from app.models import Chunk, Document, Model, ModelPermission, Quota, UsageLog, User
 from app.rag import pick_enabled_model
+from app.sse import with_stream_usage
 
 router = APIRouter(prefix="/api/rag", tags=["rag"])
 
@@ -112,20 +127,50 @@ async def _record_usage(
         logger.warning("usage_log_write_failed", user_id=user_id, status=status)
 
 
-@router.post("/query")
+def _sse(event: dict[str, Any]) -> bytes:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
+
+
+def _extract_delta_events(chunk: bytes, usage: dict[str, int]) -> list[bytes]:
+    """バックエンドの生SSEチャンクから、フロントエンド向けのdeltaイベントを取り出す。
+
+    usageが含まれていれば usage dict を更新する(ログ記録専用。フロントには送らない)。
+    """
+    events: list[bytes] = []
+    for line in chunk.decode("utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        try:
+            obj = json.loads(line[len("data: ") :])
+        except json.JSONDecodeError:
+            continue
+        choices = obj.get("choices") or []
+        if choices:
+            content = (choices[0].get("delta") or {}).get("content")
+            if content:
+                events.append(_sse({"type": "delta", "content": content}))
+        obj_usage = obj.get("usage")
+        if obj_usage:
+            usage["prompt_tokens"] = obj_usage.get("prompt_tokens", 0)
+            usage["completion_tokens"] = obj_usage.get("completion_tokens", 0)
+    return events
+
+
+@router.post("/query", response_model=None)
 async def rag_query(
     body: RagQueryRequest,
     ctx: AuthContext = Depends(current_auth),
     db: AsyncSession = Depends(get_db),
-) -> RagQueryResponse:
+) -> RagQueryResponse | StreamingResponse:
     user = ctx.user
     settings = get_settings()
     started_at = time.monotonic()
     embed_model: Model | None = None
     chat_model: Model | None = None
-    chat_usage: dict[str, int] = {}
     status_ = "ok"
     error_code: str | None = None
+    handed_off_to_stream = False
 
     try:
         rpm_limit, max_concurrent = await _get_limits(db, user.id)
@@ -177,26 +222,59 @@ async def rag_query(
                     "content": f"# コンテキスト\n{context_blocks}\n\n# 質問\n{body.question}",
                 },
             ]
-            chat_result = await chat_backend.chat(
-                {"model": chat_model.backend_name, "messages": messages}
+            stream_payload = with_stream_usage(
+                {"model": chat_model.backend_name, "messages": messages, "stream": True}
             )
-            chat_usage = chat_result.get("usage") or {}
-            answer = chat_result["choices"][0]["message"]["content"]
+            citations = [
+                Citation(
+                    document_id=document.id,
+                    filename=document.filename,
+                    chunk_id=chunk.id,
+                    content=chunk.content,
+                )
+                for chunk, document in relevant
+            ]
+            chat_model_id = chat_model.id
 
-            return RagQueryResponse(
-                answer=answer,
-                citations=[
-                    Citation(
-                        document_id=document.id,
-                        filename=document.filename,
-                        chunk_id=chunk.id,
-                        content=chunk.content,
+            async def _wrapped_stream() -> AsyncIterator[bytes]:
+                stream_status = "ok"
+                stream_error_code: str | None = None
+                usage: dict[str, int] = {}
+                try:
+                    yield _sse({"type": "status", "phase": "generating"})
+                    async for raw_chunk in chat_backend.chat_stream(stream_payload):
+                        for event in _extract_delta_events(raw_chunk, usage):
+                            yield event
+                    yield _sse(
+                        {
+                            "type": "citations",
+                            "citations": [c.model_dump() for c in citations],
+                        }
                     )
-                    for chunk, document in relevant
-                ],
-            )
+                    yield b"data: [DONE]\n\n"
+                except Exception as exc:
+                    stream_status, stream_error_code = "error", type(exc).__name__
+                    raise
+                finally:
+                    concurrency_slots.release(user.id)
+                    await asyncio.shield(
+                        _record_usage(
+                            user_id=user.id,
+                            api_key_id=ctx.api_key_id,
+                            model_id=chat_model_id,
+                            prompt_tokens=usage.get("prompt_tokens", 0),
+                            completion_tokens=usage.get("completion_tokens", 0),
+                            latency_ms=int((time.monotonic() - started_at) * 1000),
+                            status=stream_status,
+                            error_code=stream_error_code,
+                        )
+                    )
+
+            handed_off_to_stream = True
+            return StreamingResponse(_wrapped_stream(), media_type="text/event-stream")
         finally:
-            concurrency_slots.release(user.id)
+            if not handed_off_to_stream:
+                concurrency_slots.release(user.id)
 
     except RateLimitError as exc:
         status_, error_code = "rate_limited", exc.code
@@ -210,15 +288,20 @@ async def rag_query(
     finally:
         # チャット推論まで到達していれば chat_model 分として、
         # 「関係ない質問」で埋め込みのみ行った場合は embed_model 分として記録する。
-        await asyncio.shield(
-            _record_usage(
-                user_id=user.id,
-                api_key_id=ctx.api_key_id,
-                model_id=chat_model.id if chat_model else (embed_model.id if embed_model else None),
-                prompt_tokens=chat_usage.get("prompt_tokens", 0),
-                completion_tokens=chat_usage.get("completion_tokens", 0),
-                latency_ms=int((time.monotonic() - started_at) * 1000),
-                status=status_,
-                error_code=error_code,
+        # ストリーミングに引き渡した場合は _wrapped_stream 側のfinallyが記録するため
+        # ここでは何もしない(二重記録防止)。
+        if not handed_off_to_stream:
+            await asyncio.shield(
+                _record_usage(
+                    user_id=user.id,
+                    api_key_id=ctx.api_key_id,
+                    model_id=chat_model.id
+                    if chat_model
+                    else (embed_model.id if embed_model else None),
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    latency_ms=int((time.monotonic() - started_at) * 1000),
+                    status=status_,
+                    error_code=error_code,
+                )
             )
-        )
