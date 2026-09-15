@@ -31,8 +31,14 @@ def _vec(value: float, *, index: int = 0, dim: int = 1024) -> list[float]:
 
 
 async def _read_rag_events(resp: Any) -> list[dict]:
-    """RAGのSSEストリームを読み切り、イベント(dict)のリストを返す。"""
+    """RAGのSSEストリームを読み切り、イベント(dict)のリストを返す。
+
+    `data: [DONE]`で終端することを契約(docs/API.md)として固定するため、
+    最後まで読んでも[DONE]が来なければ失敗させる(黙って空リストや途中の
+    イベント列を返さない)。
+    """
     events: list[dict] = []
+    saw_done = False
     async for chunk in resp.aiter_bytes():
         for line in chunk.decode("utf-8").splitlines():
             line = line.strip()
@@ -40,9 +46,15 @@ async def _read_rag_events(resp: Any) -> list[dict]:
                 continue
             payload = line[len("data: ") :]
             if payload == "[DONE]":
+                saw_done = True
                 continue
             events.append(json.loads(payload))
+    assert saw_done, "ストリームが data: [DONE] で終端していない"
     return events
+
+
+def _event_types(events: list[dict]) -> list[str]:
+    return [e["type"] for e in events]
 
 
 def _answer_from_events(events: list[dict]) -> str:
@@ -50,7 +62,13 @@ def _answer_from_events(events: list[dict]) -> str:
 
 
 def _citations_from_events(events: list[dict]) -> list[dict]:
-    return next((e["citations"] for e in events if e["type"] == "citations"), [])
+    """citationsイベントを取り出す。ちょうど1回だけ送られる契約(docs/API.md)なので、
+
+    無い/複数あるのはどちらもテスト対象の異常として素通しせず失敗させる。
+    """
+    matches = [e["citations"] for e in events if e["type"] == "citations"]
+    assert len(matches) == 1, f"citationsイベントはちょうど1回のはずが{len(matches)}回だった"
+    return matches[0]
 
 
 class ControlledEmbedBackend(FakeBackend):
@@ -104,10 +122,14 @@ async def test_rag_query_no_relevant_chunks_skips_llm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """実際に閾値外(直交=距離1.0 > 0.6)のチャンクを1件投入したうえで、
-    citations が空になり、かつチャット推論が一度も呼ばれないことを確認する。
+
+    citations が空になり、かつチャット推論が一度も呼ばれないこと、
+    さらにストリーミングを一切使わず即座にJSON応答が返ることを確認する。
 
     確認済み: routers/rag.py の距離閾値判定を無効化(settings.rag_distance_threshold
-    を極端に大きくする)と、本テストのみで fake_chat.chat_calls が空でなくなり失敗する。
+    を極端に大きくする)と、本テストが `resp.headers["content-type"]` の
+    アサーション(SSEに切り替わる)、または `fake_chat.chat_stream_calls == []`
+    (チャット推論が呼ばれてしまう)のいずれかで失敗する。
     """
     user = await login_as_new_user()
     embed_model = await make_model(kind="embedding")
@@ -125,10 +147,14 @@ async def test_rag_query_no_relevant_chunks_skips_llm(
 
     resp = await client.post("/api/rag/query", json={"question": "関係ない質問"})
     assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/json")
     body = resp.json()
     assert body["citations"] == []
     assert "見つかりません" in body["answer"]
+    # T-27でchat()は使われなくなった(常にchat_stream())。関連文書なし判定が
+    # 壊れてLLMが呼ばれてしまった場合はここで検知する。
     assert fake_chat.chat_calls == []
+    assert fake_chat.chat_stream_calls == []
     # 埋め込みバックエンドに渡った実際の引数(質問文とbackend_name)を検証する。
     assert fake_embed.embed_calls == [(["関係ない質問"], embed_model.backend_name)]
 
@@ -162,6 +188,10 @@ async def test_rag_query_returns_citation_for_relevant_chunk(
         assert resp.headers["content-type"].startswith("text/event-stream")
         events = await _read_rag_events(resp)
 
+    # イベント順序を完全一致で固定する: status → delta(1回、FakeBackend既定チャンク
+    # のうちcontentを持つのは1個だけ) → citations。citationsがdeltaより先に来る
+    # (回答が全部届く前に引用が確定する)といった契約違反(docs/API.md)を検知できる。
+    assert _event_types(events) == ["status", "delta", "citations"]
     assert events[0] == {"type": "status", "phase": "generating"}
     assert _answer_from_events(events) == "fake"  # FakeBackend.chat_stream() の既定チャンク
     citations = _citations_from_events(events)
@@ -290,9 +320,27 @@ async def test_rag_query_concurrency_slot_held_during_answer_streaming(
     """T-27でストリーミング化した後も、回答生成(chat_stream)が完走するまで
 
     同時実行スロットが保持され続けること(検索フェーズだけでなく生成フェーズも
-    スロットの対象)。確認済み: rag.pyの`_wrapped_stream`内`finally`の
-    `concurrency_slots.release`を削除すると、本テストの2本目リクエストが
-    429ではなく200になり失敗する。
+    スロットの対象)。
+
+    確認済み(両方の変異を実際に当てて検証): rag.pyの`_wrapped_stream`内
+    `finally`の`concurrency_slots.release`を削除すると、スロットが永久に
+    解放されなくなり、本テストの2本目(resp2, 429を期待)ではなく3本目
+    (resp3, 200を期待)が失敗する。逆に、`concurrency_slots.acquire`直後
+    ([相関: rag.pyの`if not concurrency_slots.acquire(...)`の直後]に
+    `concurrency_slots.release`を呼ぶよう早めてスロットをすぐ手放すと、
+    2本目が429ではなく200になり失敗する。
+
+    同期は`BlockingChatBackend`が最初のdeltaを送った直後、実際に
+    `release.wait()`でブロックする直前にサーバー側で`asyncio.Event`を
+    セットすることで行う(httpx ASGITransport越しに`client.stream()`で
+    クライアント側からバイト列を観測しようとすると、このテスト環境では
+    アプリ側タスクがブロックするまでクライアント側の`__aenter__`/
+    `aiter_bytes()`自体が一切進行しないため、クライアント観測ベースの
+    同期は使えないことを実験で確認した)。
+    `hold_stream_open`はストリームを1チャンクだけ読んで`break`せず、
+    最後まで(DONEが届くまで)読み切る(接続を早期に閉じるとGeneratorExitで
+    `_wrapped_stream`の`finally`が即座に走ってしまい、「生成完了まで
+    保持され続ける」ことの検証にならないため)。
     """
     user = await login_as_new_user()
     embed_model = await make_model(kind="embedding")
@@ -303,13 +351,13 @@ async def test_rag_query_concurrency_slot_held_during_answer_streaming(
     await _add_chunk(db, user.id, _vec(1.0))
 
     release = asyncio.Event()
-    first_chunk_sent = asyncio.Event()
+    generating_blocked = asyncio.Event()
 
     class BlockingChatBackend(FakeBackend):
         async def chat_stream(self, payload: dict):
             self.chat_stream_calls.append(payload)
             yield b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'
-            first_chunk_sent.set()
+            generating_blocked.set()
             await release.wait()
             yield b"data: [DONE]\n\n"
 
@@ -318,22 +366,30 @@ async def test_rag_query_concurrency_slot_held_during_answer_streaming(
     )
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: BlockingChatBackend())
 
-    async def hold_first() -> None:
+    async def hold_stream_open() -> None:
         async with client.stream(
             "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
         ) as resp:
             assert resp.status_code == 200
+            # 早期にbreak/close せず、ストリームが自然に完走する(DONEまで届く)
+            # まで読み切る。
             async for _ in resp.aiter_bytes():
-                break
+                pass
 
-    task = asyncio.create_task(hold_first())
+    task = asyncio.create_task(hold_stream_open())
     try:
-        await asyncio.wait_for(first_chunk_sent.wait(), timeout=5)
+        await asyncio.wait_for(generating_blocked.wait(), timeout=5)
+        # ここまでで、サーバー側はdeltaを1つ送った後 release.wait() で
+        # ブロック中。同時実行スロットは`_wrapped_stream`がまだ完走して
+        # いない=保持されたままのはず。
         resp2 = await asyncio.wait_for(
             client.post("/api/rag/query", json={"question": "hi"}), timeout=5
         )
         assert resp2.status_code == 429
         assert resp2.json()["error"]["code"] == "RATE_LIMIT"
+        # rpm制限(既定60/min)による429と区別する。同時実行制限のRetry-Afterは
+        # rag.py側で固定で"1"を返す(rpm制限は別途61秒相当になる)。
+        assert resp2.headers["Retry-After"] == "1"
     finally:
         release.set()
         await asyncio.wait_for(task, timeout=5)
@@ -407,7 +463,14 @@ async def test_rag_query_usage_log_on_success_records_chat_model(
     assert len(logs) == 1
     assert logs[0].status == "ok"
     assert logs[0].model_id == chat_model.id
-    assert logs[0].completion_tokens == 3  # FakeBackend.chat_stream() の固定usage
+    # FakeBackend.chat_stream() の固定usage(prompt_tokens=5, completion_tokens=3)。
+    # prompt_tokensも見ないと、rag.pyがusageチャンクのprompt_tokens取り込みを
+    # 落としても(常に0のまま記録されても)検知できない。
+    assert logs[0].prompt_tokens == 5
+    assert logs[0].completion_tokens == 3
+    # T-27でストリーミング化したことで、/api/v1・/api/conversationsと同様に
+    # ttft_msが実測されるようになったこと(常にNoneのままではないこと)を固定する。
+    assert logs[0].ttft_ms is not None
 
 
 async def test_rag_query_usage_log_on_rate_limited(
@@ -619,18 +682,23 @@ async def test_rag_query_chat_backend_raises_and_logs_error(
         async def chat_stream(self, payload: dict):
             self.chat_stream_calls.append(payload)
             raise RuntimeError("チャットバックエンドが意図的に落ちたテスト用の障害")
-            yield b""  # pragma: no cover (ジェネレータにするためのto到達不能yield)
+            yield b""  # pragma: no cover (ジェネレータにするための到達不能yield)
 
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: BrokenChatBackend())
 
-    # T-27でストリーミング化したため、200(ヘッダ送信済み)の後にストリーム本体側で
-    # 例外が起きる形になる。httpxのASGITransportはこの場合も未処理例外を
-    # 呼び出し元へ再送出する(実運用のuvicorn配下では接続が異常終了する)。
-    with pytest.raises(RuntimeError):
+    # 実運用のuvicorn配下では、200(ヘッダ送信済み)の後にストリーム本体側で
+    # 例外が起きて接続が異常終了する形になるはず。ただし、このテストで使う
+    # httpxのASGITransportでは、ストリームが最終的に失敗する場合
+    # `client.stream()`のコンテキストマネージャ自体がその例外を送出し、
+    # `resp`(status_code含む)には一切アクセスできないことを実験で確認した
+    # (見せかけの成功を避けるため、届かないassertを`with`の内側には置かない)。
+    # そのため、ここでは「例外が呼び出し元まで伝播すること」と「usage_logsに
+    # 正しく記録されること」を検証する。match=で、テスト対象と無関係な
+    # RuntimeError(httpx/anyio側が投げうる)まで拾ってしまわないようにする。
+    with pytest.raises(RuntimeError, match="意図的に落ちた"):
         async with client.stream(
             "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
         ) as resp:
-            assert resp.status_code == 200
             await _read_rag_events(resp)
 
     result = await db.execute(
@@ -651,10 +719,15 @@ async def test_rag_query_stream_ignores_chunks_without_choices(
     isolate_model: Callable[[Model], Awaitable[None]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """バックエンドが`choices`が空/欠落したチャンクを混ぜて送ってきても、
+    """バックエンドが`choices`が空/欠落したチャンクや壊れたJSON行を混ぜて
 
-    (非ストリーミングだった旧実装のように`choices[0]`で例外にならず)
-    無視して残りのdeltaは正常に処理され、ストリームが最後まで完走すること。
+    送ってきても、(非ストリーミングだった旧実装のように`choices[0]`で例外に
+    ならず)無視して残りのdeltaは正常に処理され、ストリームが最後まで完走
+    すること。
+
+    期待する回答文字列("アルファ")はFakeBackend.chat_stream()の既定チャンクが
+    出す"fake"とは別物にしてある。既定チャンクにフォールバックしても
+    このアサーションだけは偶然一致しないようにするため。
     """
     user = await login_as_new_user()
     embed_model = await make_model(kind="embedding")
@@ -667,11 +740,16 @@ async def test_rag_query_stream_ignores_chunks_without_choices(
         "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
     )
 
+    def _chunk(obj: dict) -> bytes:
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()
+
     flaky = FakeBackend()
     flaky.chat_stream_chunks = [
-        b'data: {"choices":[{"delta":{"content":"fa"}}]}\n\n',
+        _chunk({"choices": [{"delta": {"content": "アル"}}]}),
         b'data: {"choices":[]}\n\n',  # choicesが空(例: keep-aliveチャンク等)
-        b'data: {"choices":[{"delta":{"content":"ke"}}]}\n\n',
+        b'data: {"model":"x"}\n\n',  # choicesキー自体が無い
+        b"data: {not valid json\n\n",  # 壊れたJSON行
+        _chunk({"choices": [{"delta": {"content": "ファ"}}]}),
         b"data: [DONE]\n\n",
     ]
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: flaky)
@@ -682,7 +760,57 @@ async def test_rag_query_stream_ignores_chunks_without_choices(
         assert resp.status_code == 200
         events = await _read_rag_events(resp)
 
-    assert _answer_from_events(events) == "fake"
+    assert len(flaky.chat_stream_calls) == 1  # 差し替えたbackendが実際に呼ばれたこと
+    assert _answer_from_events(events) == "アルファ"
+    assert len(_citations_from_events(events)) == 1
+
+    result = await db.execute(
+        select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 1
+    assert logs[0].status == "ok"
+
+
+async def test_rag_query_stream_completes_with_empty_answer(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """バックエンドが有効なdeltaを1つも送らずに完走した場合でも、
+
+    (現状の設計判断として)エラーにはせず、citationsまで正常に届いて
+    okとして完走すること。回答が空のままユーザーに何も表示されない問題への
+    対応はフロントエンド側(QuestionPanel、T-27レビュー指摘)で行っている。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    chat_model = await make_model(kind="chat")
+    await isolate_model(embed_model)
+    await isolate_model(chat_model)
+    await _add_chunk(db, user.id, _vec(1.0))
+    monkeypatch.setattr(
+        "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
+    )
+
+    empty = FakeBackend()
+    empty.chat_stream_chunks = [
+        b'data: {"choices":[{"delta":{}}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: empty)
+
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        events = await _read_rag_events(resp)
+
+    assert _event_types(events) == ["status", "citations"]  # deltaが1つも無い
+    assert _answer_from_events(events) == ""
     assert len(_citations_from_events(events)) == 1
 
     result = await db.execute(

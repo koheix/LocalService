@@ -102,6 +102,7 @@ async def _record_usage(
     prompt_tokens: int,
     completion_tokens: int,
     latency_ms: int,
+    ttft_ms: int | None,
     status: str,
     error_code: str | None,
 ) -> None:
@@ -117,7 +118,7 @@ async def _record_usage(
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     latency_ms=latency_ms,
-                    ttft_ms=None,
+                    ttft_ms=ttft_ms,
                     status=status,
                     error_code=error_code,
                 )
@@ -131,30 +132,31 @@ def _sse(event: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
 
 
-def _extract_delta_events(chunk: bytes, usage: dict[str, int]) -> list[bytes]:
-    """バックエンドの生SSEチャンクから、フロントエンド向けのdeltaイベントを取り出す。
+def _extract_delta_event(line: str, usage: dict[str, int]) -> bytes | None:
+    """バックエンドの生SSEの1行から、フロントエンド向けのdeltaイベントを取り出す。
 
     usageが含まれていれば usage dict を更新する(ログ記録専用。フロントには送らない)。
+    呼び出し側で、バックエンドのチャンク境界と行境界が一致しない場合に備えて
+    行単位にバッファリングしてから渡すこと(1行分の完全な文字列を渡す前提)。
     """
-    events: list[bytes] = []
-    for line in chunk.decode("utf-8", errors="ignore").splitlines():
-        line = line.strip()
-        if not line.startswith("data: ") or line == "data: [DONE]":
-            continue
-        try:
-            obj = json.loads(line[len("data: ") :])
-        except json.JSONDecodeError:
-            continue
-        choices = obj.get("choices") or []
-        if choices:
-            content = (choices[0].get("delta") or {}).get("content")
-            if content:
-                events.append(_sse({"type": "delta", "content": content}))
-        obj_usage = obj.get("usage")
-        if obj_usage:
-            usage["prompt_tokens"] = obj_usage.get("prompt_tokens", 0)
-            usage["completion_tokens"] = obj_usage.get("completion_tokens", 0)
-    return events
+    line = line.strip()
+    if not line.startswith("data: ") or line == "data: [DONE]":
+        return None
+    try:
+        obj = json.loads(line[len("data: ") :])
+    except json.JSONDecodeError:
+        return None
+    event = None
+    choices = obj.get("choices") or []
+    if choices:
+        content = (choices[0].get("delta") or {}).get("content")
+        if content:
+            event = _sse({"type": "delta", "content": content})
+    obj_usage = obj.get("usage")
+    if obj_usage:
+        usage["prompt_tokens"] = obj_usage.get("prompt_tokens", 0)
+        usage["completion_tokens"] = obj_usage.get("completion_tokens", 0)
+    return event
 
 
 @router.post("/query", response_model=None)
@@ -239,11 +241,30 @@ async def rag_query(
             async def _wrapped_stream() -> AsyncIterator[bytes]:
                 stream_status = "ok"
                 stream_error_code: str | None = None
+                first_chunk_at: float | None = None
                 usage: dict[str, int] = {}
+                line_buffer = ""
                 try:
                     yield _sse({"type": "status", "phase": "generating"})
                     async for raw_chunk in chat_backend.chat_stream(stream_payload):
-                        for event in _extract_delta_events(raw_chunk, usage):
+                        if first_chunk_at is None:
+                            first_chunk_at = time.monotonic()
+                        # バックエンドのチャンク境界は`data: ...`の行境界と一致すると
+                        # 限らない(1行が2つのチャンクにまたがることがある)。RAGでは
+                        # このパーサがフロントへ送るdeltaの唯一の情報源になる
+                        # (/api/v1・/api/conversationsのように生バイト列を素通しして
+                        # クライアント側で再組み立てさせているわけではない)ため、
+                        # 行単位にバッファリングしてから処理する。
+                        line_buffer += raw_chunk.decode("utf-8", errors="ignore")
+                        lines = line_buffer.split("\n")
+                        line_buffer = lines.pop()
+                        for line in lines:
+                            event = _extract_delta_event(line, usage)
+                            if event:
+                                yield event
+                    if line_buffer.strip():
+                        event = _extract_delta_event(line_buffer, usage)
+                        if event:
                             yield event
                     yield _sse(
                         {
@@ -257,6 +278,7 @@ async def rag_query(
                     raise
                 finally:
                     concurrency_slots.release(user.id)
+                    ttft_ms = int((first_chunk_at - started_at) * 1000) if first_chunk_at else None
                     await asyncio.shield(
                         _record_usage(
                             user_id=user.id,
@@ -265,13 +287,15 @@ async def rag_query(
                             prompt_tokens=usage.get("prompt_tokens", 0),
                             completion_tokens=usage.get("completion_tokens", 0),
                             latency_ms=int((time.monotonic() - started_at) * 1000),
+                            ttft_ms=ttft_ms,
                             status=stream_status,
                             error_code=stream_error_code,
                         )
                     )
 
+            resp = StreamingResponse(_wrapped_stream(), media_type="text/event-stream")
             handed_off_to_stream = True
-            return StreamingResponse(_wrapped_stream(), media_type="text/event-stream")
+            return resp
         finally:
             if not handed_off_to_stream:
                 concurrency_slots.release(user.id)
@@ -301,6 +325,7 @@ async def rag_query(
                     prompt_tokens=0,
                     completion_tokens=0,
                     latency_ms=int((time.monotonic() - started_at) * 1000),
+                    ttft_ms=None,
                     status=status_,
                     error_code=error_code,
                 )

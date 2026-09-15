@@ -17,14 +17,29 @@ export function QuestionPanel() {
     setPhase("searching");
     setAnswer(null);
     setCitations([]);
+    let receivedAnyDelta = false;
     try {
       await ragQueryStream(q, {
         onGenerating: () => setPhase("generating"),
-        onDelta: (text) => setAnswer((prev) => (prev ?? "") + text),
+        onDelta: (text) => {
+          receivedAnyDelta = true;
+          setAnswer((prev) => (prev ?? "") + text);
+        },
         onCitations: setCitations,
       });
+      // バックエンドがdeltaを1つも送らずに完走することがある(意図的な
+      // 仕様。gateway/tests/test_rag.pyのtest_rag_query_stream_completes_with_empty_answer
+      // 参照)。answerがnullのままだと画面の描画条件(asking || answer !== null)が
+      // 偽に戻り、質問しても何も表示されないまま終わったように見えてしまうため、
+      // その場合だけ明示的なプレースホルダーを出す。
+      if (!receivedAnyDelta) {
+        setAnswer("(回答が空でした)");
+      }
     } catch (err) {
-      setAnswer(`[エラー] ${err instanceof Error ? err.message : "質問に失敗しました"}`);
+      // 途中まで届いていた本文があれば残し、末尾にエラーを追記する
+      // (せっかくストリーミングされた分を丸ごと消さない)。
+      const message = err instanceof Error ? err.message : "質問に失敗しました";
+      setAnswer((prev) => (prev ? `${prev}\n[エラー] ${message}` : `[エラー] ${message}`));
     } finally {
       setPhase("idle");
     }
