@@ -1,3 +1,4 @@
+import { Menu } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Header } from "../components/Header";
 import { MessageList, type ChatMessage } from "../components/playground/MessageList";
@@ -48,6 +49,7 @@ export function Playground() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const refreshConversations = useCallback(async () => {
     const list = await listConversations();
@@ -72,6 +74,7 @@ export function Playground() {
   async function selectConversation(id: number) {
     if (sending) return;
     setCurrentId(id);
+    setSidebarOpen(false); // モバイルでは選択したら閉じてチャット画面を見せる
     const [conv, msgs] = await Promise.all([getConversation(id), listMessages(id)]);
     setForm(conversationToForm(conv));
     setMessages(
@@ -149,11 +152,31 @@ export function Playground() {
           onSelect={selectConversation}
           onCreate={handleCreate}
           disabled={sending}
+          open={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
         />
         <main className="flex min-w-0 flex-1 flex-col">
+          {/* サイドバーが幅の狭い画面(sm未満)では隠れているため、開閉と現在の
+              会話タイトルを確認できる帯をここに出す。sm以上ではサイドバーが
+              常時見えているので不要。 */}
+          <div className="flex items-center gap-2 border-b border-gray-200 p-2 dark:border-gray-700 sm:hidden">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="会話一覧を開く"
+              className="rounded-lg p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
+            >
+              <Menu className="h-5 w-5" aria-hidden />
+            </button>
+            <span className="truncate text-sm text-gray-700 dark:text-gray-300">
+              {currentId === null
+                ? "会話を選択してください"
+                : (conversations.find((c) => c.id === currentId)?.title ?? `(無題 #${currentId})`)}
+            </span>
+          </div>
           {currentId === null ? (
             <div className="m-auto text-gray-500 dark:text-gray-400">
-              左の「新しい会話を始める」から始めてください。
+              「新しい会話を始める」から始めてください。
             </div>
           ) : (
             <>
