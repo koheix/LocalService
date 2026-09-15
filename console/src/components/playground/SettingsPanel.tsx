@@ -69,6 +69,13 @@ export function SettingsPanel({
             onChange={(e) => set("model", e.target.value)}
             className="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
           >
+            {/* 会話が保持しているモデル(embeddingへの変更・無効化等で選択肢
+                から消えた場合を含む)が一覧に無いと、ブラウザは先頭optionを
+                表示するのにform.modelは古い値のままという表示とstateの
+                食い違いが起きる。実際の値をそのまま出す選択肢を足しておく。 */}
+            {form.model && !models.some((m) => m.id === form.model) && (
+              <option value={form.model}>{form.model}（選択できないモデル）</option>
+            )}
             {models.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.id}

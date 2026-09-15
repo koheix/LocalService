@@ -105,11 +105,20 @@ async def _served_name_of(db: AsyncSession, model_id: int | None) -> str | None:
 
 
 async def _resolve_model(db: AsyncSession, served_name: str | None) -> Model | None:
-    """served_name からモデル行を解決する。指定されたのに見つからなければ404。"""
+    """served_name からモデル行を解決する。指定されたのに見つからなければ404。
+
+    会話に設定できるのは kind="chat" のモデルのみ。embeddingモデルを
+    served_nameで直接指定された場合も、存在しないモデルと同様に404にする
+    (存在確認と同じ経路にまとめ、embeddingモデルの存在を漏らさない)。
+    """
     if served_name is None:
         return None
     result = await db.execute(
-        select(Model).where(Model.served_name == served_name, Model.is_enabled.is_(True))
+        select(Model).where(
+            Model.served_name == served_name,
+            Model.is_enabled.is_(True),
+            Model.kind == "chat",
+        )
     )
     model = result.scalar_one_or_none()
     if model is None:

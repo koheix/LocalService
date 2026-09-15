@@ -49,6 +49,18 @@ Ollama をもう1つ立てれば API が完全に同一になり、実装を共�
 `model`(served_name文字列)でやり取りするよう修正し、内部でのみ
 `model_id` に変換するようにした。
 
+**拡張の確認(T-21で発覚)** — `GET /api/v1/models` は `served_name` のみを
+返し `kind`(chat/embedding)を含まないため、console(プレイグラウンド)が
+新規会話のデフォルトモデルとして `models[0]` を無条件で選ぶと、返却順
+次第でembeddingモデルが選ばれてしまう不具合があった。`served_name` と
+`backend_name` の分離という本決定の趣旨(内部実体を隠す)は保ったまま、
+`kind` フィールドをレスポンスに加筆して対応した。`kind` はOpenAI互換の
+標準フィールドではないが、追加のみで既存クライアントの動作を変えない
+ため互換性は壊れない。あわせて `conversations.py` の `_resolve_model`
+にも `kind == "chat"` の条件を追加し、API を直接叩いた場合も
+embeddingモデルを会話に設定できないようにした(console側の絞り込みだけ
+では、UIを経由しないクライアントで同じ不整合が再発するため)。
+
 ---
 
 ## D-004 gateway で推論を直列化しない

@@ -25,8 +25,17 @@ async def test_list_models_returns_served_name(
 
     resp = await client.get("/api/v1/models")
     assert resp.status_code == 200
-    ids = [m["id"] for m in resp.json()["data"]]
-    assert model.served_name in ids
+    data = resp.json()["data"]
+    entry = next(m for m in data if m["id"] == model.served_name)
+    # 辞書を丸ごと比較することで、キー集合そのもの(内部実体名backend_name
+    # を漏らさないこと。D-003)も同時に固定する。id/object/owned_by/kindの
+    # いずれかだけを見るテストだと、余計なフィールドの追加漏洩を検知できない。
+    assert entry == {
+        "id": model.served_name,
+        "object": "model",
+        "owned_by": "local",
+        "kind": "chat",
+    }
 
 
 async def test_list_models_includes_kind(
@@ -41,9 +50,40 @@ async def test_list_models_includes_kind(
 
     resp = await client.get("/api/v1/models")
     assert resp.status_code == 200
-    by_id = {m["id"]: m["kind"] for m in resp.json()["data"]}
-    assert by_id[chat_model.served_name] == "chat"
-    assert by_id[embed_model.served_name] == "embedding"
+    data = resp.json()["data"]
+    chat_entry = next(m for m in data if m["id"] == chat_model.served_name)
+    embed_entry = next(m for m in data if m["id"] == embed_model.served_name)
+    assert chat_entry == {
+        "id": chat_model.served_name,
+        "object": "model",
+        "owned_by": "local",
+        "kind": "chat",
+    }
+    assert embed_entry == {
+        "id": embed_model.served_name,
+        "object": "model",
+        "owned_by": "local",
+        "kind": "embedding",
+    }
+
+
+async def test_list_models_excludes_disabled_models(
+    client: AsyncClient, login_as_new_user: Callable, make_model: Callable, db: AsyncSession
+) -> None:
+    """is_enabled=falseのモデルは一覧に出ないこと。
+
+    確認済み: routers/v1.py の list_models から
+    `Model.is_enabled.is_(True)` フィルタを外すと、本テストが失敗する。
+    """
+    await login_as_new_user()
+    model = await make_model()
+    model.is_enabled = False
+    await db.commit()
+
+    resp = await client.get("/api/v1/models")
+    assert resp.status_code == 200
+    ids = [m["id"] for m in resp.json()["data"]]
+    assert model.served_name not in ids
 
 
 async def test_chat_completions_success(
