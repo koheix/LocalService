@@ -1,4 +1,4 @@
-import { Copy, Trash2 } from "lucide-react";
+import { Copy, Trash2, X } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { Header } from "../components/Header";
 import {
@@ -42,6 +42,10 @@ export function ApiKeys() {
       })
       .catch((err) => {
         if (cancelled) return;
+        // keysをnullのままにすると表が「読み込み中…」に固定されたままになり、
+        // エラーメッセージと矛盾して見える。空状態にフォールバックする
+        // (AdminUsage.tsxの同種のエラー処理と揃える)。
+        setKeys([]);
         setError(err instanceof Error ? err.message : "APIキー一覧の取得に失敗しました");
       });
     return () => {
@@ -61,11 +65,18 @@ export function ApiKeys() {
       setCopied(false);
       setCopyFailed(false);
       setName("");
-      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "APIキーの発行に失敗しました");
-    } finally {
       setCreating(false);
+      return;
+    }
+    setCreating(false);
+    // 発行自体は成功しているので、一覧の再取得が失敗しても「発行に失敗した」
+    // と誤認させない(別メッセージにする)。
+    try {
+      await refresh();
+    } catch {
+      setError("一覧の再取得に失敗しました。再読み込みしてください");
     }
   }
 
@@ -75,11 +86,16 @@ export function ApiKeys() {
     setError(null);
     try {
       await revokeApiKey(id);
-      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "APIキーの失効に失敗しました");
-    } finally {
       setRevokingId(null);
+      return;
+    }
+    setRevokingId(null);
+    try {
+      await refresh();
+    } catch {
+      setError("一覧の再取得に失敗しました。再読み込みしてください");
     }
   }
 
@@ -90,6 +106,7 @@ export function ApiKeys() {
     // アクセスされる可能性があるため、その場合はundefinedになる。
     // 失敗時は黙らず、下に表示中のキーを手動で選択・コピーするよう促す。
     if (!navigator.clipboard) {
+      setCopied(false);
       setCopyFailed(true);
       return;
     }
@@ -98,8 +115,15 @@ export function ApiKeys() {
       setCopied(true);
       setCopyFailed(false);
     } catch {
+      setCopied(false);
       setCopyFailed(true);
     }
+  }
+
+  function handleDismissCreated() {
+    setCreated(null);
+    setCopied(false);
+    setCopyFailed(false);
   }
 
   return (
@@ -122,14 +146,33 @@ export function ApiKeys() {
         )}
 
         {created && (
-          <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-900/20">
-            <p className="mb-2 text-sm font-medium text-amber-800 dark:text-amber-200">
-              「{created.name}」を発行しました。このキーは二度と表示されません。今すぐ控えてください。
-            </p>
+          <div
+            role="status"
+            aria-live="polite"
+            className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-900/20"
+          >
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+                「{created.name}」を発行しました。このキーは二度と表示されません。今すぐ控えてください。
+              </p>
+              <button
+                type="button"
+                onClick={handleDismissCreated}
+                aria-label="発行したキーの表示を閉じる"
+                className="shrink-0 rounded-lg p-1 text-amber-700 hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900/40"
+              >
+                <X className="h-4 w-4" aria-hidden />
+              </button>
+            </div>
             <div className="flex items-center gap-2">
-              <code className="flex-1 overflow-x-auto rounded-lg bg-white px-3 py-2 text-sm text-gray-900 dark:bg-gray-900 dark:text-gray-100">
-                {created.key}
-              </code>
+              <input
+                type="text"
+                readOnly
+                value={created.key}
+                onFocus={(e) => e.currentTarget.select()}
+                aria-label="発行されたAPIキー"
+                className="flex-1 rounded-lg bg-white px-3 py-2 font-mono text-sm text-gray-900 dark:bg-gray-900 dark:text-gray-100"
+              />
               <button
                 type="button"
                 onClick={handleCopy}
@@ -141,7 +184,7 @@ export function ApiKeys() {
             </div>
             {copyFailed && (
               <p className="mt-2 text-sm text-amber-800 dark:text-amber-200" role="alert">
-                自動コピーに失敗しました。上のキーを選択して手動でコピーしてください。
+                自動コピーに失敗しました。上のキーをクリックして全選択し、手動でコピーしてください。
               </p>
             )}
           </div>
@@ -164,7 +207,7 @@ export function ApiKeys() {
             disabled={creating}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            発行する
+            {creating ? "発行中…" : "発行する"}
           </button>
         </form>
 

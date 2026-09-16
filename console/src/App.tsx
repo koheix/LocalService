@@ -1,9 +1,9 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
-import { ApiKeys } from "./pages/ApiKeys";
 import { LazyLoadErrorBoundary } from "./components/LazyLoadErrorBoundary";
 import { RequireAdmin } from "./components/RequireAdmin";
 import { RequireAuth } from "./components/RequireAuth";
+import { ApiKeys } from "./pages/ApiKeys";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { Placeholder } from "./pages/Placeholder";
