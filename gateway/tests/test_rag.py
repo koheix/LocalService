@@ -64,6 +64,10 @@ def _answer_from_events(events: list[dict]) -> str:
     return "".join(e["content"] for e in events if e["type"] == "delta")
 
 
+def _reasoning_from_events(events: list[dict]) -> str:
+    return "".join(e["content"] for e in events if e["type"] == "reasoning")
+
+
 def _citations_from_events(events: list[dict]) -> list[dict]:
     """citationsイベントを取り出す。ちょうど1回だけ送られる契約(docs/API.md)なので、
 
@@ -218,6 +222,60 @@ async def test_rag_query_returns_citation_for_relevant_chunk(
     # 他のusage_logs系アサーションだけでは検知できない)。
     assert sent["stream_options"] == {"include_usage": True}
     assert fake_embed.embed_calls == [(["GTX 1080のVRAMは？"], embed_model.backend_name)]
+
+
+async def test_rag_query_streams_reasoning_before_content(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """バックエンドが`reasoning`(思考モードを持つモデルの思考内容、T-31)を
+
+    別フィールドで送ってきた場合、`content`とは別の`"reasoning"`イベントとして
+    中継すること。実機(qwen3:4b)のOpenAI互換streamingが
+    `choices[].delta.reasoning`を`content`とは別に送ってくることを確認済み。
+
+    確認済み: rag.pyの`_extract_stream_events`から`reasoning`の分岐を削除すると、
+    本テストの`_reasoning_from_events(events) == "アルファ"`が空文字列になり
+    失敗する(`content`側のイベントは影響を受けないため、他のテストは
+    通ったままになる=このテストが無いと退行を検知できない)。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    chat_model = await make_model(kind="chat")
+    await isolate_model(embed_model)
+    await isolate_model(chat_model)
+    await _add_chunk(db, user.id, _vec(1.0))
+    monkeypatch.setattr(
+        "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
+    )
+
+    def _chunk(obj: dict) -> bytes:
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()
+
+    reasoning_chat = FakeBackend()
+    reasoning_chat.chat_stream_chunks = [
+        _chunk({"choices": [{"delta": {"reasoning": "アル"}}]}),
+        _chunk({"choices": [{"delta": {"reasoning": "ファ"}}]}),
+        _chunk({"choices": [{"delta": {"content": "ベータ"}}]}),
+        b"data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: reasoning_chat)
+
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        events = await _read_rag_events(resp)
+
+    # reasoningがcontentより先にまとまって届き、その後にdelta→citationsと
+    # 続く順序を完全一致で固定する。
+    assert _event_types(events) == ["status", "reasoning", "reasoning", "delta", "citations"]
+    assert _reasoning_from_events(events) == "アルファ"
+    assert _answer_from_events(events) == "ベータ"
 
 
 async def test_rag_query_permission_denied_for_chat_model(

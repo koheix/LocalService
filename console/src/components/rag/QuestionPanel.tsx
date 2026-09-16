@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { ragQueryStream, type Citation } from "../../lib/ragApi";
+import { ThinkingBox } from "../ThinkingBox";
 
 /** idle以外は質問中。searching→(関連文書があれば)generatingと遷移する(T-27)。 */
 type Phase = "idle" | "searching" | "generating";
@@ -8,6 +9,7 @@ export function QuestionPanel() {
   const [question, setQuestion] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [answer, setAnswer] = useState<string | null>(null);
+  const [reasoning, setReasoning] = useState("");
   const [citations, setCitations] = useState<Citation[]>([]);
 
   async function handleSubmit(e: FormEvent) {
@@ -16,11 +18,13 @@ export function QuestionPanel() {
     if (!q || phase !== "idle") return;
     setPhase("searching");
     setAnswer(null);
+    setReasoning("");
     setCitations([]);
     let receivedAnyDelta = false;
     try {
       await ragQueryStream(q, {
         onGenerating: () => setPhase("generating"),
+        onReasoning: (text) => setReasoning((prev) => prev + text),
         onDelta: (text) => {
           receivedAnyDelta = true;
           setAnswer((prev) => (prev ?? "") + text);
@@ -75,19 +79,26 @@ export function QuestionPanel() {
           <div>
             <h3 className="mb-1 text-xs font-semibold text-gray-500 dark:text-gray-400">回答</h3>
             {answer === null ? (
-              <span role="status" className="text-sm italic text-gray-600 dark:text-gray-300">
-                {phase === "searching" ? "検索中…" : "回答を生成中…"}
-              </span>
+              reasoning ? (
+                <ThinkingBox reasoning={reasoning} done={false} />
+              ) : (
+                <span role="status" className="text-sm italic text-gray-600 dark:text-gray-300">
+                  {phase === "searching" ? "検索中…" : "回答を生成中…"}
+                </span>
+              )
             ) : (
-              <p className="whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100">
-                {answer}
-                {asking && (
-                  <span
-                    className="ml-0.5 inline-block h-[1em] w-[2px] animate-pulse bg-current align-middle"
-                    aria-hidden
-                  />
-                )}
-              </p>
+              <>
+                {reasoning && <ThinkingBox reasoning={reasoning} done={true} />}
+                <p className="whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100">
+                  {answer}
+                  {asking && (
+                    <span
+                      className="ml-0.5 inline-block h-[1em] w-[2px] animate-pulse bg-current align-middle"
+                      aria-hidden
+                    />
+                  )}
+                </p>
+              </>
             )}
           </div>
           {citations.length > 0 && (

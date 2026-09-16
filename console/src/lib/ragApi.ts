@@ -41,6 +41,9 @@ export function deleteDocument(id: number): Promise<void> {
 export type RagStreamHandlers = {
   /** 検索が終わり、回答生成(ストリーミング)が始まったときに呼ばれる(T-27)。 */
   onGenerating?: () => void;
+  /** 思考内容(reasoning、T-31)の断片を受け取るたびに呼ばれる。
+   * 思考モードを持つモデルのときだけ呼ばれる。 */
+  onReasoning?: (text: string) => void;
   /** 回答本文の断片を受け取るたびに呼ばれる。 */
   onDelta: (text: string) => void;
   /** 引用一覧が確定したときに呼ばれる(回答本文がすべて届いた後、最後に1回)。 */
@@ -114,6 +117,8 @@ export async function ragQueryStream(
       }
       if (event.type === "status" && event.phase === "generating") {
         handlers.onGenerating?.();
+      } else if (event.type === "reasoning" && event.content) {
+        handlers.onReasoning?.(event.content);
       } else if (event.type === "delta" && event.content) {
         handlers.onDelta(event.content);
       } else if (event.type === "citations" && event.citations) {

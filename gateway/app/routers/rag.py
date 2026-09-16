@@ -15,8 +15,10 @@
 十分速いため同期的に行い、関連文書が見つからない場合はそのまま従来通り
 JSON即時応答(ストリーミングなし)を返す。関連文書があり実際にチャット
 推論を行う場合のみ、`text/event-stream`で
-`{"type":"status","phase":"generating"}` → `{"type":"delta","content":...}`
-(複数回) → `{"type":"citations","citations":[...]}` → `data: [DONE]`
+`{"type":"status","phase":"generating"}` →
+(`{"type":"reasoning","content":...}`(複数回、思考モードを持つモデルの
+ときだけ、T-31) →) `{"type":"delta","content":...}`(複数回) →
+`{"type":"citations","citations":[...]}` → `data: [DONE]`
 の順にイベントを送る。フロントエンド側は質問送信からこのイベント到着
 までの間を「検索中」として表示する(検索自体は同期処理なのでサーバー側に
 専用の"searching"イベントは存在しない)。
@@ -132,31 +134,39 @@ def _sse(event: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
 
 
-def _extract_delta_event(line: str, usage: dict[str, int]) -> bytes | None:
-    """バックエンドの生SSEの1行から、フロントエンド向けのdeltaイベントを取り出す。
+def _extract_stream_events(line: str, usage: dict[str, int]) -> list[bytes]:
+    """バックエンドの生SSEの1行から、フロントエンド向けのイベントを取り出す。
 
+    `reasoning`(思考内容、T-31)と`content`(本文)は別フィールドで届き、
+    同じチャンクに両方入ることは無い(実機で確認済み)が、将来の変化に
+    備えて両方チェックし、それぞれ別イベントとして返す(1行から複数
+    イベントが出ることはリスト化して表現する)。
     usageが含まれていれば usage dict を更新する(ログ記録専用。フロントには送らない)。
     呼び出し側で、バックエンドのチャンク境界と行境界が一致しない場合に備えて
     行単位にバッファリングしてから渡すこと(1行分の完全な文字列を渡す前提)。
     """
     line = line.strip()
     if not line.startswith("data: ") or line == "data: [DONE]":
-        return None
+        return []
     try:
         obj = json.loads(line[len("data: ") :])
     except json.JSONDecodeError:
-        return None
-    event = None
+        return []
+    events: list[bytes] = []
     choices = obj.get("choices") or []
     if choices:
-        content = (choices[0].get("delta") or {}).get("content")
+        delta = choices[0].get("delta") or {}
+        reasoning = delta.get("reasoning")
+        if reasoning:
+            events.append(_sse({"type": "reasoning", "content": reasoning}))
+        content = delta.get("content")
         if content:
-            event = _sse({"type": "delta", "content": content})
+            events.append(_sse({"type": "delta", "content": content}))
     obj_usage = obj.get("usage")
     if obj_usage:
         usage["prompt_tokens"] = obj_usage.get("prompt_tokens", 0)
         usage["completion_tokens"] = obj_usage.get("completion_tokens", 0)
-    return event
+    return events
 
 
 @router.post("/query", response_model=None)
@@ -259,12 +269,10 @@ async def rag_query(
                         lines = line_buffer.split("\n")
                         line_buffer = lines.pop()
                         for line in lines:
-                            event = _extract_delta_event(line, usage)
-                            if event:
+                            for event in _extract_stream_events(line, usage):
                                 yield event
                     if line_buffer.strip():
-                        event = _extract_delta_event(line_buffer, usage)
-                        if event:
+                        for event in _extract_stream_events(line_buffer, usage):
                             yield event
                     yield _sse(
                         {

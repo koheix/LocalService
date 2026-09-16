@@ -59,15 +59,23 @@ export function listMessages(id: number): Promise<Message[]> {
   return apiFetch(`/api/conversations/${id}/messages`);
 }
 
+export type SendMessageHandlers = {
+  /** 本文(content)の断片を受け取るたびに呼ばれる。 */
+  onDelta: (text: string) => void;
+  /** 思考内容(reasoning、T-31)の断片を受け取るたびに呼ばれる。
+   * chat-standard(qwen3:4b)のように思考モードを持つモデルのときだけ
+   * 呼ばれる(持たないモデルではreasoningフィールド自体が来ない)。 */
+  onReasoning?: (text: string) => void;
+};
+
 /**
  * メッセージ送信(SSEストリーミング)。生のfetchを使う(EventSourceはPOST不可、
  * apiFetchはJSONを一括で返す前提のため、この用途には向かない)。
- * onDeltaはテキスト片を受け取るたびに呼ばれる。
  */
 export async function sendMessageStream(
   conversationId: number,
   content: string,
-  onDelta: (text: string) => void,
+  handlers: SendMessageHandlers,
 ): Promise<void> {
   const res = await fetch(`/api/conversations/${conversationId}/messages`, {
     method: "POST",
@@ -107,8 +115,9 @@ export async function sendMessageStream(
       if (payload === "[DONE]") continue;
       try {
         const obj = JSON.parse(payload);
-        const delta: string | undefined = obj.choices?.[0]?.delta?.content;
-        if (delta) onDelta(delta);
+        const delta = obj.choices?.[0]?.delta ?? {};
+        if (delta.reasoning) handlers.onReasoning?.(delta.reasoning);
+        if (delta.content) handlers.onDelta(delta.content);
       } catch {
         // 断片的なJSONは無視(チャンク境界がSSEイベント境界と一致しない場合がある)
       }

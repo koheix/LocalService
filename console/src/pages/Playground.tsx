@@ -118,13 +118,23 @@ export function Playground() {
     setMessages((prev) => [...prev, { role: "user", content: text }, { role: "assistant", content: "" }]);
 
     try {
-      await sendMessageStream(currentId, text, (delta) => {
-        setMessages((prev) => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-          next[next.length - 1] = { ...last, content: last.content + delta };
-          return next;
-        });
+      await sendMessageStream(currentId, text, {
+        onDelta: (delta) => {
+          setMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            next[next.length - 1] = { ...last, content: last.content + delta };
+            return next;
+          });
+        },
+        onReasoning: (delta) => {
+          setMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            next[next.length - 1] = { ...last, reasoning: (last.reasoning ?? "") + delta };
+            return next;
+          });
+        },
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "送信に失敗しました";
