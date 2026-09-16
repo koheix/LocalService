@@ -422,3 +422,34 @@ prod dependenciesに入る(実測: 新規39パッケージ)。これはRecharts�
 - `React.lazy`によるチャンク取得失敗(再デプロイ後の開きっぱなしタブ等)が
   SPA全体の白画面クラッシュにならないよう、`LazyLoadErrorBoundary`
   (React.lazyを使う箇所専用の最小限のErrorBoundary)を追加した。
+
+---
+
+## D-019 `reasoning`フィールドの中継はOllama語彙がルーター層に残ることを許容する(T-31)
+
+**背景** — T-31でプレイグラウンド・RAGに思考内容(reasoning)のライブ表示を
+追加した。Ollamaが公開するOpenAI互換streamingは`choices[].delta.reasoning`
+というフィールド名で思考内容を送る。この名前はOpenAI標準の一部ではなく、
+Ollama固有の語彙である(vLLM等の別実装は`reasoning_content`のような
+別名を使うのが一般的)。プレイグラウンド(`/api/conversations`)は生SSEを
+無改修で素通ししているため関係ないが、RAG(`/api/rag/query`)は独自の
+SSE契約を組み立て直す実装のため、`gateway/app/routers/rag.py`
+(ルーター層)が直接`reasoning`という具体的なキー名を読んでいる
+(レビューで指摘)。
+
+**判断** — 現時点では対応せず、このままにする。
+
+**理由** — CLAUDE.mdの非交渉事項「バックエンド固有の処理は`app/backends/`
+にのみ書く」の趣旨には反するが、(1)検証機はGTX 1080でありvLLMは
+ハード制約上使えない(D-001)ため、Phase 0/1では`reasoning`はOllama以外の
+値を取り得ない、(2)Phase 4で`backends/vllm.py`を実装する際に、
+vLLM側の思考フィールド名を`reasoning`に正規化してから返す(または
+`InferenceBackend`の契約に思考フィールドの扱いを明記する)ことで解決
+できる見込みがあり、今から抽象化を用意しても実装を見ずに設計する
+(推測)ことになるため。ユーザー確認は今回は不要な軽微な技術的判断と
+判断したが、Phase 4着手時に改めて設計を検討すること。
+
+**影響** — Phase 4で`backends/vllm.py`に切り替えた場合、`rag.py`の
+`_extract_stream_events`が`reasoning`を検出できず、思考内容のライブ表示が
+(エラーにはならず)静かに機能しなくなる。Phase 4着手時に本DECISIONを
+見て対応すること。

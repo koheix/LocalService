@@ -137,10 +137,17 @@ export function Playground() {
         },
       });
     } catch (err) {
+      // 途中まで届いていた本文があれば残し、末尾にエラーを追記する
+      // (RAG側のQuestionPanelと同じ方針。せっかくストリーミングされた分を
+      // 丸ごと消さない)。
       const message = err instanceof Error ? err.message : "送信に失敗しました";
       setMessages((prev) => {
         const next = [...prev];
-        next[next.length - 1] = { role: "assistant", content: `[エラー] ${message}` };
+        const last = next[next.length - 1];
+        const content = last.content
+          ? `${last.content}\n[エラー] ${message}`
+          : `[エラー] ${message}`;
+        next[next.length - 1] = { ...last, content };
         return next;
       });
     } finally {

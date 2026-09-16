@@ -55,7 +55,8 @@ export type RagStreamHandlers = {
  *
  * 関連する文書チャンクが無い場合、gatewayはLLMを呼ばず即座にJSON応答を返す
  * (`Content-Type: application/json`)。関連チャンクがある場合のみ
- * `text/event-stream`でstatus→delta(複数回)→citationsの順にイベントが届く。
+ * `text/event-stream`でstatus→(reasoning(複数回、思考モードを持つモデルの
+ * ときだけ、T-31)→)delta(複数回)→citationsの順にイベントが届く。
  * 呼び出し元は`Content-Type`の違いを意識せず、同じhandlersで両方を扱える。
  */
 export async function ragQueryStream(

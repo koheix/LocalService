@@ -78,27 +78,29 @@ export function QuestionPanel() {
         <div className="flex flex-col gap-3 border-t border-gray-200 pt-3 dark:border-gray-700">
           <div>
             <h3 className="mb-1 text-xs font-semibold text-gray-500 dark:text-gray-400">回答</h3>
+            {/* ThinkingBoxはanswerの有無で分岐させない(常に同じ位置・同じ
+             * コンポーネント型で描画する)。三項演算子の別々の分岐に置くと、
+             * answerがnull→非nullに変わった瞬間にReactが別インスタンスとして
+             * 再マウントしてしまい、ThinkingBox内部の「done化した瞬間だけ
+             * 自動で畳む」ロジックが働かなくなる(マウント時点で既にdone=true
+             * になっているため)。 */}
+            {reasoning && <ThinkingBox reasoning={reasoning} done={answer !== null} />}
             {answer === null ? (
-              reasoning ? (
-                <ThinkingBox reasoning={reasoning} done={false} />
-              ) : (
+              !reasoning && (
                 <span role="status" className="text-sm italic text-gray-600 dark:text-gray-300">
                   {phase === "searching" ? "検索中…" : "回答を生成中…"}
                 </span>
               )
             ) : (
-              <>
-                {reasoning && <ThinkingBox reasoning={reasoning} done={true} />}
-                <p className="whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100">
-                  {answer}
-                  {asking && (
-                    <span
-                      className="ml-0.5 inline-block h-[1em] w-[2px] animate-pulse bg-current align-middle"
-                      aria-hidden
-                    />
-                  )}
-                </p>
-              </>
+              <p className="whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100">
+                {answer}
+                {asking && (
+                  <span
+                    className="ml-0.5 inline-block h-[1em] w-[2px] animate-pulse bg-current align-middle"
+                    aria-hidden
+                  />
+                )}
+              </p>
             )}
           </div>
           {citations.length > 0 && (

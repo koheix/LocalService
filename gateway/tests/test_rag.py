@@ -236,12 +236,22 @@ async def test_rag_query_streams_reasoning_before_content(
 
     別フィールドで送ってきた場合、`content`とは別の`"reasoning"`イベントとして
     中継すること。実機(qwen3:4b)のOpenAI互換streamingが
-    `choices[].delta.reasoning`を`content`とは別に送ってくることを確認済み。
+    `choices[].delta.reasoning`を送ってくることを実際に確認済み(生の1行、
+    2026-09-16採取):
+    `data: {"id":"chatcmpl-730",...,"choices":[{"index":0,"delta":
+    {"role":"assistant","content":"","reasoning":"Okay"},"finish_reason":null}]}`
+    このとき`content`キー自体は存在するが常に空文字列(falsy)で、`content`が
+    非空になった移行チャンク以降は`reasoning`キーごと無くなる。両方とも
+    非空になることは実機では一度も観測できなかったが、rag.py側は
+    `if reasoning: ... if content: ...`の独立した2分岐にしてある(将来の
+    実装変化への保険)ため、本テストでも両方非空のチャンクを1つ混ぜて、
+    その分岐が実際に2つのイベントに分かれることを検証する。
 
-    確認済み: rag.pyの`_extract_stream_events`から`reasoning`の分岐を削除すると、
-    本テストの`_reasoning_from_events(events) == "アルファ"`が空文字列になり
-    失敗する(`content`側のイベントは影響を受けないため、他のテストは
-    通ったままになる=このテストが無いと退行を検知できない)。
+    確認済み(実際に変異を当てて実行): rag.pyの`_extract_stream_events`から
+    `reasoning`の分岐を削除すると、`_reasoning_from_events(...)`の結果が
+    空文字列になる**前に**、`_event_types(events)`の完全一致比較
+    (`["status", "reasoning", ...]`を期待するが実際は`["status", "delta",
+    "citations"]`になる)で先に失敗する。
     """
     user = await login_as_new_user()
     embed_model = await make_model(kind="embedding")
@@ -260,7 +270,11 @@ async def test_rag_query_streams_reasoning_before_content(
     reasoning_chat.chat_stream_chunks = [
         _chunk({"choices": [{"delta": {"reasoning": "アル"}}]}),
         _chunk({"choices": [{"delta": {"reasoning": "ファ"}}]}),
-        _chunk({"choices": [{"delta": {"content": "ベータ"}}]}),
+        # 実機では観測されない組み合わせだが、rag.py側の2分岐が独立して
+        # 動作し、reasoningが先・contentが後の2イベントに分かれることを
+        # 検証するため、あえて両方非空のチャンクを混ぜる。
+        _chunk({"choices": [{"delta": {"reasoning": "ガン", "content": "ベータ"}}]}),
+        _chunk({"choices": [{"delta": {"content": "マ"}}]}),
         b"data: [DONE]\n\n",
     ]
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: reasoning_chat)
@@ -271,11 +285,21 @@ async def test_rag_query_streams_reasoning_before_content(
         assert resp.status_code == 200
         events = await _read_rag_events(resp)
 
-    # reasoningがcontentより先にまとまって届き、その後にdelta→citationsと
-    # 続く順序を完全一致で固定する。
-    assert _event_types(events) == ["status", "reasoning", "reasoning", "delta", "citations"]
-    assert _reasoning_from_events(events) == "アルファ"
-    assert _answer_from_events(events) == "ベータ"
+    assert len(reasoning_chat.chat_stream_calls) == 1  # 差し替えたbackendが実際に呼ばれたこと
+    # reasoningがcontentより先にまとまって届き、同一チャンク内でも
+    # reasoningが先・contentが後の2イベントに分かれ、その後にdelta→citations
+    # と続く順序を完全一致で固定する。
+    assert _event_types(events) == [
+        "status",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "delta",
+        "delta",
+        "citations",
+    ]
+    assert _reasoning_from_events(events) == "アルファガン"
+    assert _answer_from_events(events) == "ベータマ"
 
 
 async def test_rag_query_permission_denied_for_chat_model(
@@ -873,7 +897,7 @@ async def test_rag_query_stream_reassembles_delta_split_across_chunks(
     (`_answer_from_events(events) == ""`になる。前半チャンクは改行が
     無く"data: "で終わる不完全な行のためJSONDecodeErrorで捨てられ、
     後半チャンクは"data: "で始まらない残骸行になるため、これも
-    `_extract_delta_event`の`line.startswith("data: ")`チェックで
+    `_extract_stream_events`の`line.startswith("data: ")`チェックで
     弾かれ、"アルファ"が丸ごと欠落するため)。
     """
     user = await login_as_new_user()
