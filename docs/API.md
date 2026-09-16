@@ -213,6 +213,24 @@ data: [DONE]
 
 ### `GET /api/admin/usage`（`admin` ロールのみ）
 クエリ: `from`, `to`, `user_id?`, `group_by` (`user` | `model` | `day`)
+```json
+{ "group_by": "day",
+  "data": [
+    { "day": "2026-09-16", "request_count": 42,
+      "prompt_tokens": 1234, "completion_tokens": 567 }
+  ] }
+```
+`group_by=user`/`model`では`day`の代わりに`user`/`model`キーでID(数値)を返す
+（表示名への解決はフロントエンド側で`/api/admin/users`・`/api/admin/models`を
+使って行う）。該当ユーザー/モデルが削除済みの場合、`usage_logs.user_id`/
+`model_id`は`NULL`になり得るため、`user`/`model`キーの値も`null`になり得る。
+`group_by=day`の日付区切りはJST(Asia/Tokyo)基準
+（`/api/admin/summary`の「当日」と同じ基準。T-28、ユーザー確認済み）。
+
+`from`/`to`は半開区間（`from <= created_at < to`）。`to`当日を含めたい場合は
+呼び出し側で`to`に「含めたい最終日の翌日」を渡す必要がある
+（コンソールの利用状況画面はJSTの暦日として扱い、`to`には終了日の翌日の
+JST 00:00を渡している）。
 
 ### ユーザー管理
 `GET|POST /api/admin/users`, `PATCH|DELETE /api/admin/users/{id}`

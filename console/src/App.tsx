@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { AdminUsage } from "./pages/AdminUsage";
 import { RequireAdmin } from "./components/RequireAdmin";
 import { RequireAuth } from "./components/RequireAuth";
 import { Home } from "./pages/Home";
@@ -68,12 +69,16 @@ export function App() {
         "利用可能なモデルの一覧・有効化設定を行う画面です。今後実装します。",
         true,
       )}
-      {placeholderRoute(
-        "/admin/usage",
-        "利用状況",
-        "ユーザー・モデル別の利用状況を確認する画面です。今後実装します。",
-        true,
-      )}
+      <Route
+        path="/admin/usage"
+        element={
+          <RequireAuth>
+            <RequireAdmin>
+              <AdminUsage />
+            </RequireAdmin>
+          </RequireAuth>
+        }
+      />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

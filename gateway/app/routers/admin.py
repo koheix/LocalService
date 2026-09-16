@@ -138,7 +138,11 @@ async def usage(
     elif group_by == "model":
         key_col = UsageLog.model_id.label("key")
     else:
-        key_col = func.date(UsageLog.created_at).label("key")
+        # 「日」の区切りはJST基準にする(/api/admin/summaryの「今日」と同じ
+        # 基準。ユーザー確認済み、D-017追記)。created_atはtimestamptzだが、
+        # そのままfunc.date()に渡すとDBセッションのタイムゾーン設定に
+        # 依存してしまうため、明示的にJSTへ変換してから日付を取り出す。
+        key_col = func.date(func.timezone("Asia/Tokyo", UsageLog.created_at)).label("key")
 
     stmt = (
         select(
