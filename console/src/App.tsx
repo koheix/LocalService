@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { ApiKeys } from "./pages/ApiKeys";
 import { LazyLoadErrorBoundary } from "./components/LazyLoadErrorBoundary";
 import { RequireAdmin } from "./components/RequireAdmin";
 import { RequireAuth } from "./components/RequireAuth";
@@ -59,11 +60,14 @@ export function App() {
         "文字起こし",
         "録音から議事録を作る機能です。Phase 2以降で実装します。",
       )}
-      {placeholderRoute(
-        "/api-keys",
-        "API キー",
-        "外部ツールから接続するためのAPIキーを発行・管理する画面です。今後実装します。",
-      )}
+      <Route
+        path="/api-keys"
+        element={
+          <RequireAuth>
+            <ApiKeys />
+          </RequireAuth>
+        }
+      />
       {placeholderRoute(
         "/admin/users",
         "ユーザー管理",
