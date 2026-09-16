@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { UsageChart } from "../components/admin/UsageChart";
 import { Header } from "../components/Header";
 import {
   fetchUsage,
@@ -166,6 +167,10 @@ export function AdminUsage() {
           <p className="mb-3 text-sm text-red-600 dark:text-red-400" role="alert">
             {error}
           </p>
+        )}
+
+        {rangeIsValid && rows !== null && rows.length > 0 && (
+          <UsageChart rows={rows} groupBy={groupBy} keyLabel={keyLabel} />
         )}
 
         <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-700">
