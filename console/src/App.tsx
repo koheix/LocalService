@@ -1,5 +1,6 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
-import { AdminUsage } from "./pages/AdminUsage";
+import { LazyLoadErrorBoundary } from "./components/LazyLoadErrorBoundary";
 import { RequireAdmin } from "./components/RequireAdmin";
 import { RequireAuth } from "./components/RequireAuth";
 import { Home } from "./pages/Home";
@@ -7,6 +8,12 @@ import { Login } from "./pages/Login";
 import { Placeholder } from "./pages/Placeholder";
 import { Playground } from "./pages/Playground";
 import { Rag } from "./pages/Rag";
+
+// rechartsが重く(T-29)、利用状況画面を開くadminユーザー以外の全員に
+// バンドルさせたくないため、このページだけ遅延読み込みにする。
+const AdminUsage = lazy(() =>
+  import("./pages/AdminUsage").then((m) => ({ default: m.AdminUsage })),
+);
 
 function placeholderRoute(path: string, title: string, note: string, adminOnly = false) {
   const content = adminOnly ? (
@@ -74,7 +81,11 @@ export function App() {
         element={
           <RequireAuth>
             <RequireAdmin>
-              <AdminUsage />
+              <LazyLoadErrorBoundary>
+                <Suspense fallback={<div className="min-h-screen bg-white dark:bg-gray-900" />}>
+                  <AdminUsage />
+                </Suspense>
+              </LazyLoadErrorBoundary>
             </RequireAdmin>
           </RequireAuth>
         }
