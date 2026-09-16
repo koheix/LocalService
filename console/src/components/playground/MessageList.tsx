@@ -37,7 +37,12 @@ export function MessageList({
             className={"flex flex-col " + (m.role === "user" ? "items-end" : "items-start")}
           >
             {m.role === "assistant" && m.reasoning && (
-              <ThinkingBox reasoning={m.reasoning} done={contentStarted} />
+              // 本文を1つも返さずにストリームが完走することがある(RAG側の
+              // test_rag_query_stream_completes_with_empty_answer相当)。
+              // contentStartedだけで判定すると、その場合ThinkingBoxが
+              // 「思考中…」のまま永久に残ってしまうため、送信終了
+              // (isStreamingTargetがfalseになる)も完了扱いにする。
+              <ThinkingBox reasoning={m.reasoning} done={contentStarted || !isStreamingTarget} />
             )}
             {/* 思考中(reasoningがあり本文がまだ無い)間はThinkingBoxだけを見せ、
              * 空の吹き出しを重ねて表示しない。 */}

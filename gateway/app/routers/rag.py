@@ -156,6 +156,10 @@ def _extract_stream_events(line: str, usage: dict[str, int]) -> list[bytes]:
     choices = obj.get("choices") or []
     if choices:
         delta = choices[0].get("delta") or {}
+        # "reasoning"は現在の推論バックエンド実装に固有のフィールド名で、
+        # 将来の実装差し替え時には別名になり得る。ルーター層にバックエンド
+        # 固有語彙を漏らさない原則の例外として、Phase 4対応まで許容している。
+        # 参照: docs/DECISIONS.md D-019
         reasoning = delta.get("reasoning")
         if reasoning:
             events.append(_sse({"type": "reasoning", "content": reasoning}))

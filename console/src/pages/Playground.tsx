@@ -143,7 +143,8 @@ export function Playground() {
       const message = err instanceof Error ? err.message : "送信に失敗しました";
       setMessages((prev) => {
         const next = [...prev];
-        const last = next[next.length - 1];
+        const last = next.at(-1);
+        if (!last) return prev;
         const content = last.content
           ? `${last.content}\n[エラー] ${message}`
           : `[エラー] ${message}`;

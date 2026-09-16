@@ -83,7 +83,14 @@ export function QuestionPanel() {
              * answerがnull→非nullに変わった瞬間にReactが別インスタンスとして
              * 再マウントしてしまい、ThinkingBox内部の「done化した瞬間だけ
              * 自動で畳む」ロジックが働かなくなる(マウント時点で既にdone=true
-             * になっているため)。 */}
+             * になっているため)。
+             *
+             * 一方で外側の`reasoning &&`ガードは残す。次の質問を送るたびに
+             * `reasoning`が""にリセットされてThinkingBoxが一度アンマウント
+             * される(=前の質問で畳んだexpanded=falseが持ち越されない)ことに
+             * 依存しているため、「ThinkingBox内部にも`!reasoning`のreturn
+             * nullがあるから冗長」と考えて外すと、次の質問の思考中に最初から
+             * 畳まれた状態で表示される不具合が再発する。 */}
             {reasoning && <ThinkingBox reasoning={reasoning} done={answer !== null} />}
             {answer === null ? (
               !reasoning && (

@@ -241,17 +241,31 @@ async def test_rag_query_streams_reasoning_before_content(
     `data: {"id":"chatcmpl-730",...,"choices":[{"index":0,"delta":
     {"role":"assistant","content":"","reasoning":"Okay"},"finish_reason":null}]}`
     このとき`content`キー自体は存在するが常に空文字列(falsy)で、`content`が
-    非空になった移行チャンク以降は`reasoning`キーごと無くなる。両方とも
-    非空になることは実機では一度も観測できなかったが、rag.py側は
+    非空になった移行チャンク以降は`reasoning`キーごと無くなる。このフィクス
+    チャは実機のこの形(`content`キーは存在するが空文字列)をそのまま再現し、
+    `if content:`/`if reasoning:`という真偽値判定(存在チェックではない)が
+    効いていることを縛る(`if content is not None:`のような変異を入れると、
+    思考中ずっと空のdeltaイベントが混ざるようになり、`_event_types`の
+    完全一致比較で検出できる)。
+
+    また、1つの生チャンク(`chat_stream_chunks`の1要素)に`data:`行が2本
+    まとまって届く場合(Ollama/httpxの`aiter_bytes()`が複数SSEフレームを
+    1回にまとめて返すことがある)でも取りこぼされないことも、2番目の
+    チャンクで検証する。
+
+    両方とも非空になることは実機では一度も観測できなかったが、rag.py側は
     `if reasoning: ... if content: ...`の独立した2分岐にしてある(将来の
     実装変化への保険)ため、本テストでも両方非空のチャンクを1つ混ぜて、
     その分岐が実際に2つのイベントに分かれることを検証する。
 
-    確認済み(実際に変異を当てて実行): rag.pyの`_extract_stream_events`から
-    `reasoning`の分岐を削除すると、`_reasoning_from_events(...)`の結果が
-    空文字列になる**前に**、`_event_types(events)`の完全一致比較
-    (`["status", "reasoning", ...]`を期待するが実際は`["status", "delta",
-    "citations"]`になる)で先に失敗する。
+    確認済み(実際に変異を当てて実行、2026-09-16): rag.pyの
+    `_extract_stream_events`から`reasoning`の分岐(`if reasoning: ...`の
+    2行)を削除すると、`_event_types(events)`の完全一致比較が
+    `["status", "delta", "delta", "citations"]`(reasoningが無くなり、
+    "ベータ"と"マ"のdeltaだけが残る)になり、期待値
+    `["status", "reasoning", "reasoning", "reasoning", "delta", "delta",
+    "citations"]`との不一致で失敗する(`_reasoning_from_events`の
+    アサーションより先にここで落ちる)。
     """
     user = await login_as_new_user()
     embed_model = await make_model(kind="embedding")
@@ -268,13 +282,21 @@ async def test_rag_query_streams_reasoning_before_content(
 
     reasoning_chat = FakeBackend()
     reasoning_chat.chat_stream_chunks = [
-        _chunk({"choices": [{"delta": {"reasoning": "アル"}}]}),
-        _chunk({"choices": [{"delta": {"reasoning": "ファ"}}]}),
+        # 実機そのままの形: contentキーは存在するが常に空文字列("" はfalsy)。
+        _chunk({"choices": [{"delta": {"role": "assistant", "content": "", "reasoning": "アル"}}]}),
+        # 1つの生チャンクに`data:`行を2本まとめる(1本目はreasoning、2本目は
+        # reasoningが空文字列で無視されるべきもの)。
+        _chunk({"choices": [{"delta": {"content": "", "reasoning": "ファ"}}]})
+        + _chunk({"choices": [{"delta": {"content": "", "reasoning": ""}}]}),
         # 実機では観測されない組み合わせだが、rag.py側の2分岐が独立して
         # 動作し、reasoningが先・contentが後の2イベントに分かれることを
         # 検証するため、あえて両方非空のチャンクを混ぜる。
         _chunk({"choices": [{"delta": {"reasoning": "ガン", "content": "ベータ"}}]}),
-        _chunk({"choices": [{"delta": {"content": "マ"}}]}),
+        # content側チャンクにreasoning=""(空文字列)が混ざっていても
+        # reasoningイベントを生成しない(falsy判定が効いている)ことを縛る。
+        _chunk({"choices": [{"delta": {"content": "マ", "reasoning": ""}}]}),
+        # 最終チャンクでusageが届く(choicesが空でイベントは増えない)。
+        _chunk({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 5, "completion_tokens": 4}}),
         b"data: [DONE]\n\n",
     ]
     monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: reasoning_chat)
@@ -300,6 +322,16 @@ async def test_rag_query_streams_reasoning_before_content(
     ]
     assert _reasoning_from_events(events) == "アルファガン"
     assert _answer_from_events(events) == "ベータマ"
+
+    result = await db.execute(
+        select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 1
+    assert logs[0].status == "ok"
+    # reasoningはusage_logsのトークン数計上に影響しない(usageチャンクの
+    # 値のみに基づく)ことを確認する。
+    assert logs[0].completion_tokens == 4
 
 
 async def test_rag_query_permission_denied_for_chat_model(
@@ -895,8 +927,9 @@ async def test_rag_query_stream_reassembles_delta_split_across_chunks(
     `raw_chunk.decode().split("\\n")`するだけの実装に戻すと、本テストの
     `_answer_from_events(events) == "アルファ"`が失敗する
     (`_answer_from_events(events) == ""`になる。前半チャンクは改行が
-    無く"data: "で終わる不完全な行のためJSONDecodeErrorで捨てられ、
-    後半チャンクは"data: "で始まらない残骸行になるため、これも
+    無く"data: "で始まる(JSONの途中で切れた)不完全な行のため
+    JSONDecodeErrorで捨てられ、後半チャンクは"data: "で始まらない
+    残骸行になるため、これも
     `_extract_stream_events`の`line.startswith("data: ")`チェックで
     弾かれ、"アルファ"が丸ごと欠落するため)。
     """
