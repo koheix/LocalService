@@ -41,6 +41,9 @@ export function deleteDocument(id: number): Promise<void> {
 export type RagStreamHandlers = {
   /** 検索が終わり、回答生成(ストリーミング)が始まったときに呼ばれる(T-27)。 */
   onGenerating?: () => void;
+  /** 思考内容(reasoning、T-31)の断片を受け取るたびに呼ばれる。
+   * 思考モードを持つモデルのときだけ呼ばれる。 */
+  onReasoning?: (text: string) => void;
   /** 回答本文の断片を受け取るたびに呼ばれる。 */
   onDelta: (text: string) => void;
   /** 引用一覧が確定したときに呼ばれる(回答本文がすべて届いた後、最後に1回)。 */
@@ -52,7 +55,8 @@ export type RagStreamHandlers = {
  *
  * 関連する文書チャンクが無い場合、gatewayはLLMを呼ばず即座にJSON応答を返す
  * (`Content-Type: application/json`)。関連チャンクがある場合のみ
- * `text/event-stream`でstatus→delta(複数回)→citationsの順にイベントが届く。
+ * `text/event-stream`でstatus→(reasoning(複数回、思考モードを持つモデルの
+ * ときだけ、T-31)→)delta(複数回)→citationsの順にイベントが届く。
  * 呼び出し元は`Content-Type`の違いを意識せず、同じhandlersで両方を扱える。
  */
 export async function ragQueryStream(
@@ -114,6 +118,8 @@ export async function ragQueryStream(
       }
       if (event.type === "status" && event.phase === "generating") {
         handlers.onGenerating?.();
+      } else if (event.type === "reasoning" && event.content) {
+        handlers.onReasoning?.(event.content);
       } else if (event.type === "delta" && event.content) {
         handlers.onDelta(event.content);
       } else if (event.type === "citations" && event.citations) {

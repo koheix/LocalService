@@ -64,6 +64,10 @@ def _answer_from_events(events: list[dict]) -> str:
     return "".join(e["content"] for e in events if e["type"] == "delta")
 
 
+def _reasoning_from_events(events: list[dict]) -> str:
+    return "".join(e["content"] for e in events if e["type"] == "reasoning")
+
+
 def _citations_from_events(events: list[dict]) -> list[dict]:
     """citationsイベントを取り出す。ちょうど1回だけ送られる契約(docs/API.md)なので、
 
@@ -218,6 +222,130 @@ async def test_rag_query_returns_citation_for_relevant_chunk(
     # 他のusage_logs系アサーションだけでは検知できない)。
     assert sent["stream_options"] == {"include_usage": True}
     assert fake_embed.embed_calls == [(["GTX 1080のVRAMは？"], embed_model.backend_name)]
+
+
+async def test_rag_query_streams_reasoning_before_content(
+    client: AsyncClient,
+    login_as_new_user: Callable,
+    make_model: Callable,
+    db: AsyncSession,
+    isolate_model: Callable[[Model], Awaitable[None]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """バックエンドが`reasoning`(思考モードを持つモデルの思考内容、T-31)を
+
+    別フィールドで送ってきた場合、`content`とは別の`"reasoning"`イベントとして
+    中継すること。実機(qwen3:4b)のOpenAI互換streamingが
+    `choices[].delta.reasoning`を送ってくることを実際に確認済み(生の1行、
+    2026-09-16採取):
+    `data: {"id":"chatcmpl-730",...,"choices":[{"index":0,"delta":
+    {"role":"assistant","content":"","reasoning":"Okay"},"finish_reason":null}]}`
+    このとき`content`キー自体は存在するが常に空文字列(falsy)で、`content`が
+    非空になった移行チャンク以降は`reasoning`キーごと無くなる。このフィクス
+    チャは実機のこの形(`content`キーは存在するが空文字列)をそのまま再現し、
+    `if content:`/`if reasoning:`という真偽値判定(存在チェックではない)が
+    効いていることを縛る(`if content is not None:`のような変異を入れると、
+    思考中ずっと空のdeltaイベントが混ざるようになり、`_event_types`の
+    完全一致比較で検出できる)。
+
+    また、1つの生チャンク(`chat_stream_chunks`の1要素)に`data:`行が2本
+    まとまって届く場合(Ollama/httpxの`aiter_bytes()`が複数SSEフレームを
+    1回にまとめて返すことがある)でも、どちらの行も取りこぼされないことを
+    2番目のチャンクで検証する。2本とも実際にreasoningイベントを生む行に
+    してある(片方だけ観測可能な行にすると、2行目を無視する実装でも
+    テストが通ってしまうため)。空文字列reasoningの真偽値判定は別の
+    単独チャンクで検証する。
+
+    両方とも非空になることは実機では一度も観測できなかったが、rag.py側は
+    `if reasoning: ... if content: ...`の独立した2分岐にしてある(将来の
+    実装変化への保険)ため、本テストでも両方非空のチャンクを1つ混ぜて、
+    その分岐が実際に2つのイベントに分かれることを検証する。
+
+    確認済み(実際に変異を当てて実行、2026-09-16): rag.pyの
+    `_extract_stream_events`から`reasoning`の分岐(`if reasoning: ...`の
+    2行)を削除すると、`_event_types(events)`の完全一致比較が
+    `["status", "delta", "delta", "citations"]`(reasoningが無くなり、
+    "ベータ"と"マ"のdeltaだけが残る)になり、下記の期待値との不一致で
+    失敗する(`_reasoning_from_events`のアサーションより先にここで落ちる)。
+    """
+    user = await login_as_new_user()
+    embed_model = await make_model(kind="embedding")
+    chat_model = await make_model(kind="chat")
+    await isolate_model(embed_model)
+    await isolate_model(chat_model)
+    await _add_chunk(db, user.id, _vec(1.0))
+    monkeypatch.setattr(
+        "app.routers.rag.get_embed_backend", lambda: ControlledEmbedBackend(_vec(1.0))
+    )
+
+    def _chunk(obj: dict) -> bytes:
+        return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode()
+
+    reasoning_chat = FakeBackend()
+    reasoning_chat.chat_stream_chunks = [
+        # 実機そのままの形: contentキーは存在するが常に空文字列("" はfalsy)。
+        _chunk({"choices": [{"delta": {"role": "assistant", "content": "", "reasoning": "アル"}}]}),
+        # 1つの生チャンクに`data:`行を2本まとめる。どちらの行も実際に
+        # reasoningイベントを生む(2行目を無視する実装だとevents列が
+        # 短くなり、下の完全一致アサーションで検出できる)。
+        _chunk({"choices": [{"delta": {"content": "", "reasoning": "ファ"}}]})
+        + _chunk({"choices": [{"delta": {"content": "", "reasoning": "ソ"}}]}),
+        # reasoning=""(空文字列)単独のチャンク。falsy判定が効いていれば
+        # イベントを生成しない。
+        _chunk({"choices": [{"delta": {"content": "", "reasoning": ""}}]}),
+        # 実機では観測されない組み合わせだが、rag.py側の2分岐が独立して
+        # 動作し、reasoningが先・contentが後の2イベントに分かれることを
+        # 検証するため、あえて両方非空のチャンクを混ぜる。
+        _chunk({"choices": [{"delta": {"reasoning": "ガン", "content": "ベータ"}}]}),
+        # content側チャンクにreasoning=""(空文字列)が混ざっていても
+        # reasoningイベントを生成しない(falsy判定が効いている)ことを縛る。
+        _chunk({"choices": [{"delta": {"content": "マ", "reasoning": ""}}]}),
+        # 最終チャンクでusageが届く(choicesは非空だがdeltaが空なので
+        # イベントは増えない)。
+        _chunk({"choices": [{"delta": {}}], "usage": {"prompt_tokens": 5, "completion_tokens": 4}}),
+        b"data: [DONE]\n\n",
+    ]
+    monkeypatch.setattr("app.routers.rag.get_chat_backend", lambda: reasoning_chat)
+
+    async with client.stream(
+        "POST", "/api/rag/query", json={"question": "GTX 1080のVRAMは？"}
+    ) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        events = await _read_rag_events(resp)
+
+    assert len(reasoning_chat.chat_stream_calls) == 1  # 差し替えたbackendが実際に呼ばれたこと
+    # reasoningがcontentより先にまとまって届き、同一チャンク内でも
+    # reasoningが先・contentが後の2イベントに分かれ、その後にdelta→citations
+    # と続く順序を完全一致で固定する。
+    assert _event_types(events) == [
+        "status",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "reasoning",
+        "delta",
+        "delta",
+        "citations",
+    ]
+    # イベントの中身も1件は完全一致で固定し、バックエンド固有の生データが
+    # 余分なキーとして紛れ込んでいないことも縛る(CLAUDE.mdのルーター層に
+    # バックエンド語彙を漏らさない原則の観点)。
+    assert events[1] == {"type": "reasoning", "content": "アル"}
+    assert _reasoning_from_events(events) == "アルファソガン"
+    assert _answer_from_events(events) == "ベータマ"
+
+    result = await db.execute(
+        select(UsageLog).where(UsageLog.user_id == user.id, UsageLog.app == "rag")
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 1
+    assert logs[0].status == "ok"
+    # reasoningはusage_logsのトークン数計上に影響しない(usageチャンクの
+    # 値のみに基づく)ことを確認する。prompt/completionを両方見て、
+    # 取り違え(入れ替わり)の変異も検出できるようにする。
+    assert logs[0].prompt_tokens == 5
+    assert logs[0].completion_tokens == 4
 
 
 async def test_rag_query_permission_denied_for_chat_model(
@@ -813,9 +941,10 @@ async def test_rag_query_stream_reassembles_delta_split_across_chunks(
     `raw_chunk.decode().split("\\n")`するだけの実装に戻すと、本テストの
     `_answer_from_events(events) == "アルファ"`が失敗する
     (`_answer_from_events(events) == ""`になる。前半チャンクは改行が
-    無く"data: "で終わる不完全な行のためJSONDecodeErrorで捨てられ、
-    後半チャンクは"data: "で始まらない残骸行になるため、これも
-    `_extract_delta_event`の`line.startswith("data: ")`チェックで
+    無く"data: "で始まる(JSONの途中で切れた)不完全な行のため
+    JSONDecodeErrorで捨てられ、後半チャンクは"data: "で始まらない
+    残骸行になるため、これも
+    `_extract_stream_events`の`line.startswith("data: ")`チェックで
     弾かれ、"アルファ"が丸ごと欠落するため)。
     """
     user = await login_as_new_user()

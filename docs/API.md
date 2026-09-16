@@ -107,6 +107,10 @@ OpenAI 準拠。バックエンドは `ollama-embed`（CPU）に固定。
 - 処理順序・エラー・レート制限は `/api/v1/chat/completions` と同じ
 - 応答は常に `stream: true` 相当の SSE（`/api/v1` と同形式）。完了後に
   アシスタント応答を保存し、`usage_logs` に `app: "playground"` で記録する
+- バックエンドの生 SSE を無改修で中継するため、モデルが思考モードを持つ
+  場合は `choices[].delta.reasoning`（本文の`content`とは別フィールド、
+  T-31）もそのままクライアントへ届く。会話履歴の保存対象は`content`のみで、
+  `reasoning`は保存しない（ライブ表示専用）
 
 ---
 
@@ -150,6 +154,8 @@ BackgroundTasks` でテキスト抽出→チャンク分割→埋め込み生成
 ```
 data: {"type": "status", "phase": "generating"}
 
+data: {"type": "reasoning", "content": "検証機の仕様書に..."}
+
 data: {"type": "delta", "content": "GeForce"}
 
 data: {"type": "delta", "content": " GTX 1080"}
@@ -162,6 +168,13 @@ data: {"type": "citations", "citations": [
 data: [DONE]
 
 ```
+`reasoning`イベントは、モデルが思考モードを持つ場合のみ`delta`イベントより
+前に(複数回)送られる（T-31。`chat-standard`のqwen3:4bはOllama側の設定で
+毎回思考を行うため、実際にはほぼ必ず送られる）。ただしこの順序は
+バックエンドが送ってくる順にそのまま中継しているだけで、gateway側が
+強制しているわけではない（バックエンドが`content`確定後に`reasoning`を
+送り返すような実装だった場合、その順序のまま中継される）。フロントエンド
+はこの間を「回答生成中」の一部として、思考内容をライブ表示する。
 `citations` は回答本文がすべて届いた後、最後にまとめて1回だけ送る。
 ストリーミング中にバックエンド側で例外が起きた場合は、200応答を返した
 後で接続が異常終了する（`/api/v1/chat/completions` や

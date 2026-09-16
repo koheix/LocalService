@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { ragQueryStream, type Citation } from "../../lib/ragApi";
+import { ThinkingBox } from "../ThinkingBox";
 
 /** idle以外は質問中。searching→(関連文書があれば)generatingと遷移する(T-27)。 */
 type Phase = "idle" | "searching" | "generating";
@@ -8,6 +9,7 @@ export function QuestionPanel() {
   const [question, setQuestion] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [answer, setAnswer] = useState<string | null>(null);
+  const [reasoning, setReasoning] = useState("");
   const [citations, setCitations] = useState<Citation[]>([]);
 
   async function handleSubmit(e: FormEvent) {
@@ -16,11 +18,13 @@ export function QuestionPanel() {
     if (!q || phase !== "idle") return;
     setPhase("searching");
     setAnswer(null);
+    setReasoning("");
     setCitations([]);
     let receivedAnyDelta = false;
     try {
       await ragQueryStream(q, {
         onGenerating: () => setPhase("generating"),
+        onReasoning: (text) => setReasoning((prev) => prev + text),
         onDelta: (text) => {
           receivedAnyDelta = true;
           setAnswer((prev) => (prev ?? "") + text);
@@ -74,10 +78,26 @@ export function QuestionPanel() {
         <div className="flex flex-col gap-3 border-t border-gray-200 pt-3 dark:border-gray-700">
           <div>
             <h3 className="mb-1 text-xs font-semibold text-gray-500 dark:text-gray-400">回答</h3>
+            {/* ThinkingBoxはanswerの有無で分岐させない(常に同じ位置・同じ
+             * コンポーネント型で描画する)。三項演算子の別々の分岐に置くと、
+             * answerがnull→非nullに変わった瞬間にReactが別インスタンスとして
+             * 再マウントしてしまい、ThinkingBox内部の「done化した瞬間だけ
+             * 自動で畳む」ロジックが働かなくなる(マウント時点で既にdone=true
+             * になっているため)。
+             *
+             * 一方で外側の`reasoning &&`ガードは残す。次の質問を送るたびに
+             * `reasoning`が""にリセットされてThinkingBoxが一度アンマウント
+             * される(=前の質問で畳んだexpanded=falseが持ち越されない)ことに
+             * 依存しているため、「ThinkingBox内部にも`!reasoning`のreturn
+             * nullがあるから冗長」と考えて外すと、次の質問の思考中に最初から
+             * 畳まれた状態で表示される不具合が再発する。 */}
+            {reasoning && <ThinkingBox reasoning={reasoning} done={answer !== null} />}
             {answer === null ? (
-              <span role="status" className="text-sm italic text-gray-600 dark:text-gray-300">
-                {phase === "searching" ? "検索中…" : "回答を生成中…"}
-              </span>
+              !reasoning && (
+                <span role="status" className="text-sm italic text-gray-600 dark:text-gray-300">
+                  {phase === "searching" ? "検索中…" : "回答を生成中…"}
+                </span>
+              )
             ) : (
               <p className="whitespace-pre-wrap text-sm text-gray-900 dark:text-gray-100">
                 {answer}
