@@ -16,6 +16,14 @@ export class LazyLoadErrorBoundary extends Component<Props, State> {
     return { hasError: true };
   }
 
+  componentDidCatch(error: unknown, info: { componentStack?: string | null }): void {
+    // このboundaryはimport()失敗以外の例外(想定外のデータでchartがthrowする
+    // 等)も同じ画面で覆ってしまうため、原因調査ができるよう握り潰さず
+    // ログに残す(再読み込みしても直らないバグを「読み込み失敗」だと
+    // 誤解させないため)。
+    console.error("LazyLoadErrorBoundary caught an error", error, info.componentStack);
+  }
+
   render() {
     if (this.state.hasError) {
       return (

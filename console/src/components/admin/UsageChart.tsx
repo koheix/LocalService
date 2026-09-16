@@ -154,7 +154,7 @@ export function UsageChart({
           <YAxis
             type="category"
             dataKey="key"
-            width={140}
+            width={180}
             tick={{ fill: textColor, fontSize: 12 }}
             tickFormatter={(v: string) => truncateLabel(v)}
           />
