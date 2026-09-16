@@ -70,13 +70,16 @@ export function ApiKeys() {
       setCreating(false);
       return;
     }
-    setCreating(false);
     // 発行自体は成功しているので、一覧の再取得が失敗しても「発行に失敗した」
-    // と誤認させない(別メッセージにする)。
+    // と誤認させない(別メッセージにする)。setCreating(false)はrefresh完了後に
+    // 行う(先に戻すとボタンが再度押せる状態になり、再取得の往復中に連打
+    // されると重複発行されてしまう)。
     try {
       await refresh();
     } catch {
       setError("一覧の再取得に失敗しました。再読み込みしてください");
+    } finally {
+      setCreating(false);
     }
   }
 
@@ -91,11 +94,13 @@ export function ApiKeys() {
       setRevokingId(null);
       return;
     }
-    setRevokingId(null);
+    // setRevokingId(null)はrefresh完了後に行う(理由はhandleCreateと同様)。
     try {
       await refresh();
     } catch {
       setError("一覧の再取得に失敗しました。再読み込みしてください");
+    } finally {
+      setRevokingId(null);
     }
   }
 
@@ -168,6 +173,7 @@ export function ApiKeys() {
               <input
                 type="text"
                 readOnly
+                autoComplete="off"
                 value={created.key}
                 onFocus={(e) => e.currentTarget.select()}
                 aria-label="発行されたAPIキー"
