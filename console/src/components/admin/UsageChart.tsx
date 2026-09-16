@@ -29,8 +29,18 @@ function usePrefersDark(): boolean {
   return prefersDark;
 }
 
-function truncateLabel(label: string, max = 18): string {
+function truncateLabel(label: string, max = 24): string {
   return label.length > max ? `${label.slice(0, max - 1)}…` : label;
+}
+
+const formatNumber = (v: number) => v.toLocaleString();
+
+// Rechartsの<Tooltip formatter>はvalueがstring|number|配列と広く型付けられて
+// いるため、専用の緩い型で受けてから数値だけtoLocaleStringする。
+function formatTooltipValue(value: unknown): string {
+  if (typeof value === "number") return value.toLocaleString();
+  if (Array.isArray(value)) return value.map((v) => formatTooltipValue(v)).join(", ");
+  return String(value);
 }
 
 type ChartRow = {
@@ -65,8 +75,13 @@ export function UsageChart({
 
   if (rows.length === 0) return null;
 
+  // keyには全文を入れる(軸の表示だけtickFormatterで切り詰める)。ここで
+  // 切り詰めてしまうと、Tooltipのlabelも切り詰め後の文字列になり全文が
+  // 二度と見えなくなるほか、別のユーザー/モデルが同じ切り詰め結果に
+  // 衝突して見分けが付かなくなる(集計自体は別バーのまま壊れないが、
+  // ラベルだけが紛らわしくなる)。
   const data: ChartRow[] = rows.map((row) => ({
-    key: groupBy === "day" ? (row.day ?? "(不明)") : truncateLabel(keyLabel(row)),
+    key: groupBy === "day" ? (row.day ?? "(不明)") : keyLabel(row),
     prompt_tokens: row.prompt_tokens,
     completion_tokens: row.completion_tokens,
     request_count: row.request_count,
@@ -82,12 +97,14 @@ export function UsageChart({
             <YAxis
               yAxisId="tokens"
               tick={{ fill: textColor, fontSize: 12 }}
+              tickFormatter={formatNumber}
               label={{ value: "トークン数", angle: -90, position: "insideLeft", fill: textColor, fontSize: 12 }}
             />
             <YAxis
               yAxisId="requests"
               orientation="right"
               tick={{ fill: textColor, fontSize: 12 }}
+              tickFormatter={formatNumber}
               label={{
                 value: "リクエスト数",
                 angle: 90,
@@ -96,7 +113,7 @@ export function UsageChart({
                 fontSize: 12,
               }}
             />
-            <Tooltip contentStyle={tooltipStyle} />
+            <Tooltip contentStyle={tooltipStyle} formatter={formatTooltipValue} />
             <Legend wrapperStyle={{ fontSize: 12, color: textColor }} />
             <Bar
               yAxisId="tokens"
@@ -133,9 +150,15 @@ export function UsageChart({
       <ResponsiveContainer width="100%" height={height}>
         <BarChart data={data} layout="vertical" margin={{ top: 8, right: 8, left: 8, bottom: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={gridColor} horizontal={false} />
-          <XAxis type="number" tick={{ fill: textColor, fontSize: 12 }} />
-          <YAxis type="category" dataKey="key" width={140} tick={{ fill: textColor, fontSize: 12 }} />
-          <Tooltip contentStyle={tooltipStyle} />
+          <XAxis type="number" tick={{ fill: textColor, fontSize: 12 }} tickFormatter={formatNumber} />
+          <YAxis
+            type="category"
+            dataKey="key"
+            width={140}
+            tick={{ fill: textColor, fontSize: 12 }}
+            tickFormatter={(v: string) => truncateLabel(v)}
+          />
+          <Tooltip contentStyle={tooltipStyle} formatter={formatTooltipValue} />
           <Legend wrapperStyle={{ fontSize: 12, color: textColor }} />
           <Bar dataKey="prompt_tokens" stackId="tokens" name="入力トークン" fill={promptColor} />
           <Bar dataKey="completion_tokens" stackId="tokens" name="出力トークン" fill={completionColor} />

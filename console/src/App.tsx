@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { LazyLoadErrorBoundary } from "./components/LazyLoadErrorBoundary";
 import { RequireAdmin } from "./components/RequireAdmin";
 import { RequireAuth } from "./components/RequireAuth";
 import { Home } from "./pages/Home";
@@ -80,9 +81,11 @@ export function App() {
         element={
           <RequireAuth>
             <RequireAdmin>
-              <Suspense fallback={null}>
-                <AdminUsage />
-              </Suspense>
+              <LazyLoadErrorBoundary>
+                <Suspense fallback={<div className="min-h-screen bg-white dark:bg-gray-900" />}>
+                  <AdminUsage />
+                </Suspense>
+              </LazyLoadErrorBoundary>
             </RequireAdmin>
           </RequireAuth>
         }
