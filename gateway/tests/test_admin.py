@@ -536,10 +536,10 @@ async def test_db_session_timezone_is_pinned_to_utc(db: AsyncSession) -> None:
     「セッションTZがたまたまUTCだから通る」だけの状態になり、本番環境や
     DBの設定変更で無自覚に壊れる(T-28レビューで発覚)。
 
-    確認済み: `app/db.py`の`connect_args`の`server_settings`(timezone指定)を
-    外すと、本テストが(このリポジトリのdocker-compose.ymlのpostgresイメージ
-    の既定である"Etc/UTC"を返すため現時点ではたまたま通ってしまうが)
-    タイムゾーンが保証されていない状態に戻る。
+    確認済み(実際に`app/db.py`の`connect_args`を外して実行): `SHOW TimeZone`は
+    "UTC"ではなく"Etc/UTC"を返し、`assert tz == "UTC"`が
+    `AssertionError: assert 'Etc/UTC' == 'UTC'`で失敗する。つまりこのガードは
+    「外しても通ってしまう無意味なテスト」ではなく、外せば確実に落ちる。
     """
     result = await db.execute(text("SHOW TimeZone"))
     tz = result.scalar_one()
@@ -561,13 +561,34 @@ async def test_admin_usage_group_by_day_uses_jst_boundary(
     completion_tokens)まで完全一致で固定し、集計そのものが壊れる変異
     (sum対象の取り違え等)も検出できるようにする。
 
-    確認済み: admin.pyのgroup_by=="day"のkey_colを`func.date(UsageLog.created_at)`
-    (JST変換なし)に戻すと、本テストの完全一致比較が失敗する
-    (UTC 14:59:59のログが"2030-01-02"ではなく"2030-01-01"に、UTC 15:00:00の
-    ログが"2030-01-03"ではなく"2030-01-02"に集計されてしまうため)。
+    確認済み(実際にadmin.pyのgroup_by=="day"のkey_colを
+    `func.date(UsageLog.created_at)`(JST変換なし)に戻して実行): 2件とも
+    "2030-01-02"の1バケットに集約されてしまい(`{"day": "2030-01-02",
+    "request_count": 3, "prompt_tokens": 12, "completion_tokens": 7}`のみ)、
+    本テストの完全一致比較が失敗する。
+
+    本テストの判定力は「DBセッションTZがJSTのように東側にずれていないこと」
+    という前提の上に成り立っている(そうでなければ、JST変換を外しても
+    セッションTZ側で同じ変換が暗黙に行われ、区別できなくなる)。この前提は
+    `test_db_session_timezone_is_pinned_to_utc`で別途保証されているが、
+    そのテストだけが選択的にスキップされたり、`app/db.py`の固定値を
+    書き換えつつそのテストの期待値も一緒に書き換えるような誤修正をされた
+    場合に備え、本テスト自身でも(文字列比較ではなく)振る舞いとして
+    同じ前提を確認しておく。
     """
     user = await login_as_new_user(role="admin")
     model = await make_model()
+
+    # 前提確認: 生のcreated_at(UTC 15:00:00ちょうど、JST日境界の瞬間)を
+    # セッションTZのまま(JST変換を挟まずに)date()した結果が、JST日付
+    # ("2030-01-03")ではなくUTC日付("2030-01-02")のままであること。
+    # これが崩れている(セッションTZが東側にずれている)と、以降の
+    # アサーションはJST変換の有無を区別できなくなる。
+    boundary_probe = await db.execute(text("SELECT date(TIMESTAMPTZ '2030-01-02 15:00:00+00')"))
+    assert boundary_probe.scalar_one().isoformat() == "2030-01-02", (
+        "DBセッションのタイムゾーンがUTCから東側にずれている可能性がある。"
+        "このテストはJST変換の有無を区別できない状態になっている"
+    )
 
     def _log(offset: timedelta, prompt_tokens: int, completion_tokens: int) -> UsageLog:
         base = datetime(2030, 1, 2, 15, 0, 0, tzinfo=UTC)  # JST 2030-01-03 00:00:00
@@ -584,7 +605,11 @@ async def test_admin_usage_group_by_day_uses_jst_boundary(
 
     db.add_all(
         [
+            # JST境界の2秒前 → JST 2030-01-02 23:59:58 → "2030-01-02"バケット
+            _log(-timedelta(seconds=2), prompt_tokens=2, completion_tokens=2),
             # JST境界の1秒前 → JST 2030-01-02 23:59:59 → "2030-01-02"バケット
+            # (↑と合わせて2件にし、request_countが常に1になる変異
+            # (func.count()の対象を取り違える等)も検出できるようにする)
             _log(-timedelta(seconds=1), prompt_tokens=3, completion_tokens=4),
             # JST境界ちょうど → JST 2030-01-03 00:00:00 → "2030-01-03"バケット
             _log(timedelta(0), prompt_tokens=7, completion_tokens=1),
@@ -606,7 +631,7 @@ async def test_admin_usage_group_by_day_uses_jst_boundary(
     )
     assert resp.status_code == 200
     assert resp.json()["data"] == [
-        {"day": "2030-01-02", "request_count": 1, "prompt_tokens": 3, "completion_tokens": 4},
+        {"day": "2030-01-02", "request_count": 2, "prompt_tokens": 5, "completion_tokens": 6},
         {"day": "2030-01-03", "request_count": 1, "prompt_tokens": 7, "completion_tokens": 1},
     ]
 

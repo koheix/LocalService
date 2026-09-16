@@ -377,3 +377,12 @@ D-014のビルド不要方針が適していたが、画面数の増加（ホー
 統一した。`func.date(UsageLog.created_at)`をそのまま使わず、
 `func.date(func.timezone('Asia/Tokyo', UsageLog.created_at))`でJSTへ変換
 してから日付を取り出す形に変更した。
+
+あわせて、`gateway/app/db.py`のDBエンジンにセッションタイムゾーンをUTCに
+明示固定する設定(`connect_args={"server_settings": {"timezone": "UTC"}}`)を
+追加した。上記のJST変換式自体はセッションTZに依存しない(実測確認済み)ため
+本番の集計結果への影響はないが、(1)将来`func.date(timestamptz)`のような
+「セッションTZに暗黙依存する」SQL式を書いてしまった場合の保険、
+(2)このJST変換を検証する退行テストが、セッションTZがたまたま東側の
+オフセットになった場合に無自覚に判定力を失うのを防ぐため、の2点を目的に
+本番エンジンの接続設定として明示した(レビューで発覚)。

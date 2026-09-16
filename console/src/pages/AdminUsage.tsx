@@ -63,14 +63,15 @@ export function AdminUsage() {
       .catch(() => {});
   }, []);
 
+  const rangeIsValid = isValidDateString(range.from) && isValidDateString(range.to);
+
   useEffect(() => {
     let cancelled = false;
     // 日付入力は<input type="date">でクリアされ得る(空文字になる)。その間は
     // 問い合わせない(Invalid Dateのままfetchすると例外になり、画面が
-    // 白くなってしまう)。
-    if (!isValidDateString(range.from) || !isValidDateString(range.to)) {
-      return;
-    }
+    // 白くなってしまう)。表示側はrangeIsValidを見て「未入力」を案内し、
+    // 入力欄と食い違う古いrowsをそのまま出さないようにする。
+    if (!rangeIsValid) return;
     // 開始日・終了日はJSTの暦日として扱う(group_by=dayの日別集計がJST基準
     // になっているため、範囲の絞り込みもJSTに揃えないと、選んだ日付の
     // JST 00:00〜09:00が抜け落ちたり、選んでいない日付が混ざったりする)。
@@ -95,7 +96,7 @@ export function AdminUsage() {
     return () => {
       cancelled = true;
     };
-  }, [groupBy, range]);
+  }, [groupBy, range, rangeIsValid]);
 
   function keyLabel(row: UsageRow): string {
     if (groupBy === "day") return row.day ?? "(不明)";
@@ -156,7 +157,12 @@ export function AdminUsage() {
           </div>
         </div>
 
-        {error && (
+        {!rangeIsValid && (
+          <p className="mb-3 text-sm text-gray-500 dark:text-gray-400" role="status">
+            開始日・終了日を入力してください
+          </p>
+        )}
+        {rangeIsValid && error && (
           <p className="mb-3 text-sm text-red-600 dark:text-red-400" role="alert">
             {error}
           </p>
@@ -174,7 +180,13 @@ export function AdminUsage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-              {rows === null ? (
+              {!rangeIsValid ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-6 text-center text-gray-400">
+                    期間を指定してください
+                  </td>
+                </tr>
+              ) : rows === null ? (
                 <tr>
                   <td colSpan={5} className="px-4 py-6 text-center text-gray-400">
                     読み込み中…

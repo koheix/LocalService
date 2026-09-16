@@ -11,11 +11,15 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import get_settings
 
-# セッションのタイムゾーンをUTCに固定する。固定しないと(サーバー環境や
-# initdbの設定次第で)DBセッションのタイムゾーンが変わり得て、
-# func.date(timestamptz)のような「セッションTZに依存する」SQL式の結果が
-# 環境ごとに変わってしまう(T-28で発覚。group_by=dayの日付集計をJSTに
-# 明示変換する実装(routers/admin.py)は、この前提がある上で書かれている)。
+# セッションのタイムゾーンをUTCに固定する。
+# routers/admin.pyのgroup_by=day集計(`func.timezone("Asia/Tokyo", ...)`で
+# 明示的にJSTへ変換してからdate()を取る)自体はセッションTZに依存しない
+# (実測済み: セッションTZをUTC/JST/その他どれにしても結果は変わらない)。
+# それでもここで明示固定するのは、(1)将来func.date(timestamptz)のような
+# 「セッションTZに暗黙依存する」SQL式を書いてしまった場合の保険、
+# (2)group_by=dayのJST変換を検証する退行テストが、セッションTZがたまたま
+# JST寄りになった場合に(暗黙のTZ変換と明示変換が一致してしまい)無自覚に
+# 判定力を失うのを防ぐため(T-28レビューで発覚)。
 engine: AsyncEngine = create_async_engine(
     get_settings().database_url,
     pool_pre_ping=True,
